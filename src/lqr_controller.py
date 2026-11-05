@@ -17,16 +17,16 @@ class ReverseLQRController:
     def __init__(
         self,
         dims: Optional[VehicleDimensions] = None,
-        q_diag: Tuple[float, float] = (3.5, 7.0),
-        r_val: float = 18.0,
-        max_delta_phi_deg: float = 22.0
+        q_diag: Tuple[float, float] = (4.0, 8.0),
+        r_val: float = 12.0,
+        max_delta_phi_deg: float = 25.0
     ):
         self.dims = dims or VehicleDimensions()
-        # Calibrated state weights on hitch deviations: [delta_beta1, delta_beta2]
+        # Symmetric calibrated state weights: [delta_beta1, delta_beta2]
         self.Q = np.diag([q_diag[0], q_diag[1]])
-        # Calibrated control weight balancing responsiveness and smooth counter-steering
+        # Calibrated control weight giving 1:1 balanced gain authority
         self.R = np.array([[r_val]])
-        # Maximum allowed perturbation steering offset (+/- 22 degrees)
+        # Maximum allowed perturbation steering offset (+/- 25 degrees)
         self.max_delta_phi = math.radians(max_delta_phi_deg)
 
     def compute_linearized_matrices(
