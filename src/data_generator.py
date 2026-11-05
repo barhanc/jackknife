@@ -167,7 +167,7 @@ class SyntheticDataGenerator:
         classes_list = []
         rev_curr_idx = 0
 
-        limit_rad = math.radians(50.0)
+        limit_rad = math.radians(52.0)
 
         for i in range(15, N - 15):
             fwd_entry = forward_history[N - 1 - i]
@@ -220,7 +220,7 @@ class SyntheticDataGenerator:
                 perturbed_b2 = state.beta2 + noise_b2
 
                 # Enforce physical angle limits safely before critical threshold
-                limit_rad = math.radians(50.0)
+                limit_rad = math.radians(52.0)
                 perturbed_b1 = float(np.clip(perturbed_b1, -limit_rad, limit_rad))
                 perturbed_b2 = float(np.clip(perturbed_b2, -limit_rad, limit_rad))
 
@@ -268,8 +268,8 @@ class SyntheticDataGenerator:
 
                 # Corrective curvature: steer trailer 2 towards centerline
                 y_rel_off = float(tokens_off[0, 1])
-                c_y = 0.14  # rad per meter
-                delta_b2_des = float(np.clip(c_y * y_rel_off, -math.radians(22.0), math.radians(22.0)))
+                c_y = 0.22  # rad per meter (crisp restoring stiffness)
+                delta_b2_des = float(np.clip(c_y * y_rel_off, -math.radians(35.0), math.radians(35.0)))
 
                 b2_target = state.beta2 + delta_b2_des
                 b1_target = state.beta1 + (self.dims.L1 / self.dims.L2) * delta_b2_des

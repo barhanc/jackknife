@@ -17,7 +17,7 @@ class ReverseLQRController:
         # Balanced control weight (R=8.0 prevents both gain explosion and sluggish under-steering)
         self.R = np.array([[8.0]])
         # Maximum allowed perturbation steering offset (+/- 22 degrees)
-        self.max_delta_phi = math.radians(22.0)
+        self.max_delta_phi = math.radians(28.0)
 
     def compute_linearized_matrices(
         self,
@@ -103,16 +103,18 @@ class ReverseLQRController:
         delta_phi = float(ke.item() if hasattr(ke, 'item') else ke[0])
 
         # Non-Linear Inflection & Anti-Jackknife Cascade Protection:
-        # In S-curve inflections (where Trailer 1 and Trailer 2 have opposite signs) or when
-        # beta2 diverges, linear LQR gains can reinforce each other and command full lock in the wrong direction.
+        # In severe S-curve inflections (where Trailer 2 is heavily articulated AND opposing Trailer 1)
+        # or when beta2 approaches the physical cliff (> 44 deg, where jackknife is at 70 deg),
+        # linear LQR gains can reinforce each other and command full lock in the wrong direction.
         # We invoke cascaded outer/inner loop control:
         # 1. Outer loop sets the safe target articulation for Trailer 1 (b1_ref) needed to stabilize Trailer 2.
         # 2. Inner loop steers the tractor cab to track b1_ref without overshooting.
-        is_inflection = (actual_beta1 * actual_beta2 < -0.015) or (abs(actual_beta2) > math.radians(22.0))
-        if is_inflection:
+        is_severe_inflection = (actual_beta1 * actual_beta2 < -0.05) and (abs(actual_beta2) > math.radians(26.0))
+        is_near_jackknife = abs(actual_beta2) > math.radians(44.0)
+        if is_severe_inflection or is_near_jackknife:
             sin_b1_eq = (self.dims.L1 / self.dims.L2) * math.sin(nominal_beta2)
             sin_b1_cmd = sin_b1_eq + 1.2 * e2
-            sin_b1_cmd = float(np.clip(sin_b1_cmd, -0.65, 0.65))
+            sin_b1_cmd = float(np.clip(sin_b1_cmd, -0.72, 0.72))  # Allow Trailer 1 up to 46 deg
             b1_ref = math.asin(sin_b1_cmd)
             err_b1 = actual_beta1 - b1_ref
             phi_star = nominal_phi + 1.8 * err_b1
