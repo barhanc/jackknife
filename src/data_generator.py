@@ -22,7 +22,7 @@ PATH_TYPES = [
 
 class ReversingDataset(Dataset):
     """
-    In-memory PyTorch Dataset for Multi-Trailer Reversing RL-PFN.
+    In-memory PyTorch Dataset for Multi-Trailer Reversing ControlPFN.
     Contains:
       - lookahead_tokens: (N, 64, 7) float32
       - hitch_states: (N, 4) float32
@@ -40,166 +40,159 @@ class ReversingDataset(Dataset):
         return self.tokens[idx], self.hitch_states[idx], self.steer_targets[idx]
 
 
+def compute_flatness_states(path: Path, dims: VehicleDimensions) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Evaluates the exact analytical Differential Flatness equations for a B-Double
+    multi-trailer vehicle where Trailer 2's rear axle (x2, y2) is the flat output.
+
+    For any C^2 reference curve parameterized by arc length s:
+      1. tan(beta2) = L2 * kappa2
+      2. kappa1 = cos(beta2) * [kappa2 + dbeta2/ds2]
+         tan(beta1) = L1 * kappa1
+      3. kappa0 = cos(beta1) * [kappa1 + dbeta1/ds1]
+         tan(phi)   = L0 * kappa0
+
+    Returns:
+      beta1 (np.ndarray): Trailer 1 hitch angles along curve (rad)
+      beta2 (np.ndarray): Trailer 2 hitch angles along curve (rad)
+      phi   (np.ndarray): Tractor steering angles along curve (rad)
+    """
+    ds = path.ds
+    N = len(path.x)
+    s2 = np.arange(N, dtype=np.float64) * ds
+    k2 = path.curvatures.astype(np.float64)
+    dk2_ds2 = np.gradient(k2, s2)
+
+    # 1. Trailer 2 -> Trailer 1 Flatness Map
+    tan_b2 = dims.L2 * k2
+    b2 = np.arctan(tan_b2)
+    cos_b2 = np.cos(b2)
+    db2_ds2 = (dims.L2 * dk2_ds2) / (1.0 + tan_b2**2)
+
+    # 2. Trailer 1 -> Tractor Axle Flatness Map
+    k1 = cos_b2 * (k2 + db2_ds2)
+    tan_b1 = dims.L1 * k1
+    b1 = np.arctan(tan_b1)
+    cos_b1 = np.cos(b1)
+
+    s1 = np.cumsum(np.maximum(0.1, cos_b2) * ds)
+    dk1_ds1 = np.gradient(k1, s1)
+    db1_ds1 = (dims.L1 * dk1_ds1) / (1.0 + tan_b1**2)
+
+    # 3. Tractor Axle -> Front Steer Wheel Flatness Map
+    k0 = cos_b1 * (k1 + db1_ds1)
+    tan_phi = dims.L0 * k0
+
+    phi = np.clip(np.arctan(tan_phi), -dims.max_steer_rad, dims.max_steer_rad).astype(np.float32)
+    b1 = np.clip(b1, -dims.crit_hitch_rad * 0.95, dims.crit_hitch_rad * 0.95).astype(np.float32)
+    b2 = np.clip(b2, -dims.crit_hitch_rad * 0.95, dims.crit_hitch_rad * 0.95).astype(np.float32)
+
+    return b1, b2, phi
+
+
+def create_recovery_path(
+    base_path: Path,
+    lat_offset: float = 1.5,
+    heading_offset: float = 0.15,
+    transition_len: float = 20.0,
+    ds: float = 0.4
+) -> Path:
+    """
+    Generates a C^2 smooth quintic polynomial recovery transition that smoothly
+    connects an off-nominal pose (x_start, y_start, theta_start) back onto the
+    reference centerline path without any geometric kinks.
+    """
+    x0, y0 = float(base_path.x[0]), float(base_path.y[0])
+    th0 = float(base_path.headings[0])
+    nx = -math.sin(th0)
+    ny = math.cos(th0)
+
+    num_trans = max(10, int(transition_len / ds))
+    t = np.linspace(0.0, 1.0, num_trans, dtype=np.float64)
+    # Quintic polynomial: h(0)=1, h(1)=0, h'(0)=h'(1)=0, h''(0)=h''(1)=0
+    poly = 1.0 - (10.0 * t**3 - 15.0 * t**4 + 6.0 * t**5)
+
+    trans_x: List[float] = []
+    trans_y: List[float] = []
+    for k in range(num_trans):
+        prog = float(t[k]) * transition_len
+        bx = x0 + prog * math.cos(th0)
+        by = y0 + prog * math.sin(th0)
+        curr_offset = lat_offset * float(poly[k])
+        trans_x.append(bx + curr_offset * nx)
+        trans_y.append(by + curr_offset * ny)
+
+    start_idx = min(len(base_path.x) - 1, int(transition_len / base_path.ds))
+    full_x = np.concatenate([np.array(trans_x, dtype=np.float64), base_path.x[start_idx:]])
+    full_y = np.concatenate([np.array(trans_y, dtype=np.float64), base_path.y[start_idx:]])
+    return Path(full_x, full_y, ds=ds)
+
+
 class SyntheticDataGenerator:
     """
-    Generates diverse, dynamically exact multi-trailer reversing demonstrations
-    via closed-form time-reversal of natural non-holonomic trajectories.
-    Eliminates all heuristic LQR linearizations and synthetic noise corruption.
+    Generates diverse, mathematically exact multi-trailer reversing demonstrations
+    using Differential Flatness. Eliminates all heuristic LQR linearizations,
+    artificial noise injection, and backward-in-time drift paradoxes.
     """
     def __init__(self, dims: Optional[VehicleDimensions] = None):
         self.dims = dims or VehicleDimensions()
         self.kinematics = TractorDoubleTrailerKinematics(self.dims)
 
-    def generate_single_trajectory(
+    def extract_flatness_samples(
         self,
-        path_type: Optional[str] = None,
-        length_m: float = 80.0,
-        dt: float = 0.05,
-        v_forward: float = 1.5
-    ) -> List[Dict[str, Any]]:
-        """
-        Rolls out an exact forward trajectory along a procedurally sampled path,
-        incorporating natural entry offsets and recovery convergence.
-        """
-        rng = np.random.default_rng()
-        if path_type is None:
-            path_type = str(rng.choice(PATH_TYPES))
-
-        path = generate_synthetic_path(length_m=length_m, ds=0.8, path_type=path_type)
-        if len(path.x) < 25:
-            return []
-
-        # 40% nominal path alignment, 60% diverse offset convergence
-        if rng.random() < 0.60:
-            lat_offset = float(rng.uniform(-1.8, 1.8))
-            heading_offset = float(rng.uniform(-0.35, 0.35))  # ±20 degrees
-            b1_init = float(rng.uniform(-0.25, 0.25))          # ±14 degrees
-            b2_init = float(rng.uniform(-0.25, 0.25))          # ±14 degrees
-        else:
-            lat_offset = 0.0
-            heading_offset = 0.0
-            b1_init = float(rng.uniform(-0.05, 0.05)) if rng.random() < 0.5 else 0.0
-            b2_init = float(rng.uniform(-0.05, 0.05)) if rng.random() < 0.5 else 0.0
-
-        th0_init = path.headings[0] + heading_offset
-        norm_x = -math.sin(path.headings[0])
-        norm_y = math.cos(path.headings[0])
-
-        x0_init = path.x[0] + lat_offset * norm_x
-        y0_init = path.y[0] + lat_offset * norm_y
-
-        state = VehicleState(
-            x0=x0_init,
-            y0=y0_init,
-            theta0=th0_init,
-            beta1=b1_init,
-            beta2=b2_init,
-            phi=0.0
-        )
-
-        steps = int((length_m - 12.0) / (v_forward * dt))
-        history = []
-
-        lookahead_dist = 4.5  # Pure pursuit lookahead for tractor cab
-        fwd_nearest_idx = 0
-
-        for step in range(steps):
-            # Compute Pure Pursuit steering for tractor cab
-            cos_t0, sin_t0 = math.cos(state.theta0), math.sin(state.theta0)
-            fx = state.x0 + self.dims.L0 * cos_t0
-            fy = state.y0 + self.dims.L0 * sin_t0
-
-            fwd_nearest_idx, _ = path.update_progression(fx, fy, fwd_nearest_idx)
-            target_idx = min(len(path.x) - 1, fwd_nearest_idx + int(lookahead_dist / path.ds))
-            gx = path.x[target_idx]
-            gy = path.y[target_idx]
-
-            dx = gx - fx
-            dy = gy - fy
-            local_x = cos_t0 * dx + sin_t0 * dy
-            local_y = -sin_t0 * dx + cos_t0 * dy
-
-            dist_to_goal = math.hypot(local_x, local_y)
-            if dist_to_goal < 0.5:
-                alpha = path.headings[target_idx] - state.theta0
-                alpha = math.atan2(math.sin(alpha), math.cos(alpha))
-                target_phi = math.atan2(2.0 * self.dims.L0 * math.sin(alpha), lookahead_dist)
-            else:
-                target_phi = math.atan2(2.0 * self.dims.L0 * local_y, dist_to_goal**2)
-
-            target_phi = max(-self.dims.max_steer_rad, min(self.dims.max_steer_rad, target_phi))
-
-            # Record vehicle multi-body state
-            x1, y1, th1 = self.kinematics.get_trailer1_axle(state)
-            x2, y2, th2 = self.kinematics.get_trailer2_axle(state)
-
-            history.append({
-                'state': VehicleState(state.x0, state.y0, state.theta0, state.beta1, state.beta2, state.phi),
-                't2_axle': (x2, y2, th2),
-                'phi': state.phi,
-                'target_phi': target_phi
-            })
-
-            # Advance kinematics forward using RK4
-            state = self.kinematics.step_rk4(state, v0=v_forward, target_phi=target_phi, dt=dt)
-            if self.kinematics.is_jackknifed(state):
-                break
-
-        return history
-
-    def extract_reversing_samples(
-        self,
-        forward_history: List[Dict[str, Any]],
+        base_path: Path,
+        actual_path: Optional[Path] = None,
         sigma_deg: float = 4.0
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Applies time-reversal to forward history and extracts exact (tokens, hitch_state, steer_target) samples.
-        Each sample is an uncorrupted, kinematically exact physical state.
+        Extracts exact (tokens, hitch_state, steer_target) samples along actual_path
+        with reference to base_path.
         """
-        N = len(forward_history)
-        if N < 50:
-            return np.zeros((0, 64, 7), dtype=np.float32), np.zeros((0, 4), dtype=np.float32), np.zeros((0, 15), dtype=np.float32)
+        tracked_path = actual_path if actual_path is not None else base_path
+        N = len(tracked_path.x)
+        if N < 35:
+            return (
+                np.zeros((0, 64, 7), dtype=np.float32),
+                np.zeros((0, 4), dtype=np.float32),
+                np.zeros((0, 15), dtype=np.float32)
+            )
 
-        # Build reverse path traced by Trailer 2 rear axle
-        t2_x = np.array([h['t2_axle'][0] for h in forward_history])
-        t2_y = np.array([h['t2_axle'][1] for h in forward_history])
+        b1, b2, phi = compute_flatness_states(tracked_path, self.dims)
 
-        rev_t2_x = t2_x[::-1]
-        rev_t2_y = t2_y[::-1]
-        reverse_path = Path(rev_t2_x, rev_t2_y, ds=0.8)
+        # In reverse, Trailer 2 body heading points forward towards Trailer 1: th2 = th_path - pi
+        th2_arr = tracked_path.headings - math.pi
 
         tokens_list = []
         states_list = []
         targets_list = []
-        rev_curr_idx = 0
+        base_curr_idx = 0
 
-        # Discard start and end turnaround transients
-        for i in range(12, N - 12):
-            fwd_entry = forward_history[N - 1 - i]
-            state: VehicleState = fwd_entry['state']
-            x2, y2, th2 = fwd_entry['t2_axle']
-            nominal_phi = fwd_entry['phi']
+        # Sample interior points to avoid boundary gradient edge effects
+        for i in range(4, N - 12):
+            x2 = float(tracked_path.x[i])
+            y2 = float(tracked_path.y[i])
+            th2 = float(th2_arr[i])
 
-            rev_curr_idx, _ = reverse_path.update_progression(x2, y2, rev_curr_idx)
+            base_curr_idx, _ = base_path.update_progression(x2, y2, base_curr_idx)
 
-            # Lookahead tokens ahead of Trailer 2 in reverse
-            tokens = reverse_path.get_lookahead_tokens(
+            # Lookahead tokens ahead of Trailer 2 in Trailer 2's body frame
+            tokens = base_path.get_lookahead_tokens(
                 x_t2=x2,
                 y_t2=y2,
                 theta_t2=th2,
                 num_tokens=64,
                 ds=0.8,
-                current_idx=rev_curr_idx
+                current_idx=base_curr_idx
             )
 
             hitch_state = np.array([
-                math.sin(state.beta1),
-                math.cos(state.beta1),
-                math.sin(state.beta2),
-                math.cos(state.beta2)
+                math.sin(float(b1[i])),
+                math.cos(float(b1[i])),
+                math.sin(float(b2[i])),
+                math.cos(float(b2[i]))
             ], dtype=np.float32)
 
-            soft_target = steer_to_soft_target(nominal_phi, sigma_deg=sigma_deg)
+            soft_target = steer_to_soft_target(float(phi[i]), sigma_deg=sigma_deg)
 
             tokens_list.append(tokens)
             states_list.append(hitch_state)
@@ -213,25 +206,57 @@ class SyntheticDataGenerator:
 
     def generate_dataset(
         self,
-        num_trajectories: int = 160,
+        num_trajectories: int = 120,
         length_m: float = 80.0,
+        sigma_deg: float = 4.0,
         **kwargs
     ) -> ReversingDataset:
         """
-        Generates full synthetic dataset by sampling diverse procedural trajectories.
+        Generates full synthetic dataset by sampling diverse procedural paths
+        and computing closed-form Differential Flatness solutions.
+        Includes 50% nominal path following and 50% offset recovery trajectories.
         """
+        rng = np.random.default_rng()
         all_tokens = []
         all_states = []
         all_targets = []
 
         for _ in range(num_trajectories):
-            fwd_hist = self.generate_single_trajectory(length_m=length_m)
-            if len(fwd_hist) >= 50:
-                toks, states, targets = self.extract_reversing_samples(fwd_hist)
-                if len(toks) > 0:
-                    all_tokens.append(toks)
-                    all_states.append(states)
-                    all_targets.append(targets)
+            ptype = str(rng.choice(PATH_TYPES))
+            base_path = generate_synthetic_path(
+                length_m=length_m,
+                ds=0.4,
+                path_type=ptype,
+                allow_rotation=True
+            )
+            if len(base_path.x) < 35:
+                continue
+
+            # 50% nominal path following, 50% offset recovery
+            if rng.random() < 0.50:
+                lat_offset = float(rng.uniform(-2.2, 2.2))
+                heading_offset = float(rng.uniform(-0.30, 0.30))  # ±17 degrees
+                trans_len = float(rng.uniform(16.0, 26.0))
+                actual_path = create_recovery_path(
+                    base_path=base_path,
+                    lat_offset=lat_offset,
+                    heading_offset=heading_offset,
+                    transition_len=trans_len,
+                    ds=0.4
+                )
+            else:
+                actual_path = None
+
+            toks, states, tgts = self.extract_flatness_samples(
+                base_path=base_path,
+                actual_path=actual_path,
+                sigma_deg=sigma_deg
+            )
+
+            if len(toks) > 0:
+                all_tokens.append(toks)
+                all_states.append(states)
+                all_targets.append(tgts)
 
         if not all_tokens:
             raise RuntimeError("Failed to generate any valid training trajectories.")
