@@ -64,10 +64,11 @@ class SyntheticDataGenerator:
     Generates training data via closed-form time-reversal of forward trajectories
     plus tuned LQR contraction funnel perturbations.
     """
-    def __init__(self, dims: Optional[VehicleDimensions] = None):
+    def __init__(self, dims: Optional[VehicleDimensions] = None, c_y: float = 0.16):
         self.dims = dims or VehicleDimensions()
         self.kinematics = TractorDoubleTrailerKinematics(self.dims)
         self.lqr = ReverseLQRController(self.dims)
+        self.c_y = c_y
 
     def generate_single_trajectory(
         self,
@@ -166,6 +167,7 @@ class SyntheticDataGenerator:
         states_list = []
         classes_list = []
         rev_curr_idx = 0
+        limit_rad = math.radians(52.0)
 
         for i in range(15, N - 15):
             fwd_entry = forward_history[N - 1 - i]
@@ -242,6 +244,61 @@ class SyntheticDataGenerator:
                 tokens_list.append(tokens)
                 states_list.append(hitch_state_pert)
                 classes_list.append(class_pert)
+
+            # 3. Lateral Cross-Track & Heading Offset Perturbations (Path Re-centering Funnels)
+            # Teaches the network how to counter-steer back to centerline when off-track!
+            if np.random.rand() < 0.45:
+                dy_local = float(np.random.uniform(-1.2, 1.2))
+                dth_local = float(np.random.uniform(-math.radians(10.0), math.radians(10.0)))
+
+                x2_pert = x2 - dy_local * math.sin(th2)
+                y2_pert = y2 + dy_local * math.cos(th2)
+                th2_pert = th2 + dth_local
+
+                tokens_off = reverse_path.get_lookahead_tokens(
+                    x_t2=x2_pert,
+                    y_t2=y2_pert,
+                    theta_t2=th2_pert,
+                    num_tokens=64,
+                    ds=0.8,
+                    current_idx=rev_curr_idx
+                )
+
+                # Corrective curvature: steer trailer 2 towards centerline
+                y_rel_off = float(tokens_off[0, 1])
+                delta_b2_des = float(np.clip(self.c_y * y_rel_off, -math.radians(35.0), math.radians(35.0)))
+
+                b2_target = state.beta2 + delta_b2_des
+                b1_target = state.beta1 + (self.dims.L1 / self.dims.L2) * delta_b2_des
+                phi_target = nominal_phi - (self.dims.L0 / self.dims.L2) * delta_b2_des
+
+                # Add small tracking noise to actual state
+                act_b1 = float(state.beta1 + np.random.normal(0.0, math.radians(3.0)))
+                act_b2 = float(state.beta2 + np.random.normal(0.0, math.radians(3.0)))
+                act_b1 = float(np.clip(act_b1, -limit_rad, limit_rad))
+                act_b2 = float(np.clip(act_b2, -limit_rad, limit_rad))
+
+                phi_star_off = self.lqr.corrective_steering(
+                    nominal_phi=phi_target,
+                    nominal_beta1=b1_target,
+                    nominal_beta2=b2_target,
+                    actual_beta1=act_b1,
+                    actual_beta2=act_b2,
+                    v0=-1.5
+                )
+
+                hitch_state_off = np.array([
+                    math.sin(act_b1),
+                    math.cos(act_b1),
+                    math.sin(act_b2),
+                    math.cos(act_b2)
+                ], dtype=np.float32)
+
+                class_off = steer_to_soft_target(phi_star_off)
+
+                tokens_list.append(tokens_off)
+                states_list.append(hitch_state_off)
+                classes_list.append(class_off)
 
         if not classes_list:
             return np.zeros((0, 64, 7), dtype=np.float32), np.zeros((0, 4), dtype=np.float32), np.zeros((0, 15), dtype=np.float32)
