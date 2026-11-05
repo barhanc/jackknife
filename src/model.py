@@ -10,12 +10,6 @@ STEER_CLASSES = [-35.0, -30.0, -25.0, -20.0, -15.0, -10.0, -5.0, 0.0, 5.0, 10.0,
 STEER_CLASSES_RAD = [math.radians(deg) for deg in STEER_CLASSES]
 NUM_STEER_CLASSES = len(STEER_CLASSES)  # 15
 
-def steer_to_class_idx(phi_rad: float) -> int:
-    """Finds closest discrete steering class index."""
-    phi_deg = math.degrees(phi_rad)
-    diffs = [abs(phi_deg - c) for c in STEER_CLASSES]
-    return int(diffs.index(min(diffs)))
-
 def class_idx_to_steer(idx: int) -> float:
     """Converts class index to steering angle in radians."""
     return STEER_CLASSES_RAD[idx]

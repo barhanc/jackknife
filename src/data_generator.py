@@ -6,7 +6,7 @@ from typing import List, Tuple, Dict, Any, Optional
 
 from src.kinematics import TractorDoubleTrailerKinematics, VehicleDimensions, VehicleState
 from src.path_generator import Path, generate_synthetic_path
-from src.model import steer_to_class_idx, steer_to_soft_target, NUM_STEER_CLASSES
+from src.model import steer_to_soft_target, NUM_STEER_CLASSES
 
 PATH_TYPES = [
     "chicane",
