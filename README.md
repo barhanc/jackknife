@@ -1,5 +1,3 @@
-# Jackknife: Autonomous B-Double Truck Reversing with RL-PFNs
-
 ![Showcase](.github/assets/showcase.gif)
 
 ## Quick Start
