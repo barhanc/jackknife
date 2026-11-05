@@ -20,7 +20,8 @@ def train_model(
     save_path: str = "models/pfn_best.pt",
     device_str: Optional[str] = None,
     from_scratch: bool = True,
-    stream: bool = True
+    stream: bool = True,
+    record_presets_every: int = 5
 ):
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
 
@@ -223,6 +224,15 @@ def train_model(
             'metrics_history': metrics_history
         }, save_path)
         print(f" -> Checkpoint saved to {save_path} (Latest: Epoch {epoch}, Val Adj Acc: {val_adj:.1f}%)")
+
+        if record_presets_every > 0 and (epoch % record_presets_every == 0 or epoch == epochs):
+            try:
+                from record_presets import record_all_presets
+                print(f"\n--- Recording Presets & Visual Runs (Epoch {epoch}) ---")
+                record_all_presets(model_path=save_path, prefix=f"epoch_{epoch}_")
+                record_all_presets(model_path=save_path, prefix="")
+            except Exception as ex:
+                print(f"Warning: Failed to record presets at epoch {epoch}: {ex}")
 
     print(f"\nTraining completed! Latest checkpoint saved to: {save_path}")
     return model
