@@ -135,19 +135,22 @@ def simulate_and_record(
     gif_path = ""
     if record_gif and gif_frames:
         gif_path = os.path.join(ARTIFACT_DIR, f"{output_base}.gif")
-        # Append final frame holding for 1.5s
-        final_bytes = pygame.image.tostring(game.screen, "RGB")
-        final_img = Image.frombytes("RGB", (game.width, game.height), final_bytes).resize((700, 450), Image.Resampling.BILINEAR)
-        gif_frames.extend([final_img] * 12)
-
-        gif_frames[0].save(
-            gif_path,
-            save_all=True,
-            append_images=gif_frames[1:],
-            duration=50,
-            loop=0,
-            optimize=True
-        )
+        # Quantize and optimize frames for lightweight remote viewing (< 1.5MB)
+        quant_frames = [
+            f.resize((520, 334), Image.Resampling.BILINEAR).quantize(colors=64, method=Image.Resampling.NEAREST)
+            for f in gif_frames[::2]
+        ]
+        if quant_frames:
+            # Hold final frame for 1.5s
+            quant_frames.extend([quant_frames[-1]] * 8)
+            quant_frames[0].save(
+                gif_path,
+                save_all=True,
+                append_images=quant_frames[1:],
+                duration=70,
+                loop=0,
+                optimize=True
+            )
 
     print(f"[{name}] Result: {status} | Steps: {step} | Dist: {dist_m:.1f}m | Mean CTE: {mean_cte:.3f}m | Max B2: {max_b2:.1f}° -> Saved PNG & GIF")
 
