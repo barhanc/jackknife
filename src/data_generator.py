@@ -341,22 +341,18 @@ class SyntheticDataGenerator:
             else:
                 length = float(np.random.uniform(65.0, 100.0))
 
-            # Domain Randomization: Sample teacher persona for this trajectory
-            q1 = float(np.random.uniform(3.0, 6.0))
-            q2 = float(np.random.uniform(6.0, 12.0))
-            r_val = float(np.random.uniform(6.0, 10.0))
-            max_delta_deg = float(np.random.uniform(22.0, 30.0))
-            inflection_b2 = float(np.random.uniform(20.0, 30.0))
-            emergency_b2 = float(np.random.uniform(36.0, 48.0))
-            cy_sample = float(np.random.uniform(0.12, 0.24))
+            # Domain Randomization: Sample OG teacher persona for this trajectory
+            q1 = float(np.random.uniform(2.0, 5.0))
+            q2 = float(np.random.uniform(4.0, 9.0))
+            r_val = float(np.random.uniform(15.0, 30.0))
+            max_delta_deg = float(np.random.uniform(16.0, 26.0))
+            cy_sample = float(np.random.uniform(0.12, 0.20))
 
             traj_lqr = ReverseLQRController(
                 dims=self.dims,
                 q_diag=(q1, q2),
                 r_val=r_val,
-                max_delta_phi_deg=max_delta_deg,
-                inflection_b2_deg=inflection_b2,
-                emergency_b2_deg=emergency_b2
+                max_delta_phi_deg=max_delta_deg
             )
 
             hist = self.generate_single_trajectory(path_type=ptype, length_m=length)
