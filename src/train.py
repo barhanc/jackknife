@@ -73,6 +73,13 @@ def train_model(
     metrics_path = os.path.join(os.path.dirname(save_path) or ".", "training_metrics.json")
     metrics_csv_path = os.path.join(os.path.dirname(save_path) or ".", "training_metrics.csv")
 
+    if from_scratch:
+        if os.path.exists(metrics_csv_path):
+            try:
+                os.remove(metrics_csv_path)
+            except Exception:
+                pass
+
     # If resuming from checkpoint, try loading existing metrics
     if not from_scratch and os.path.exists(metrics_path):
         try:
