@@ -584,7 +584,7 @@ class JackknifeGame25D:
 
         t_start = time.perf_counter()
         if self.model is not None:
-            steer_cmd, attn, probs = self.model.predict_action(tokens, hitch_state, self.device, use_expectation=True, temperature=0.35)
+            steer_cmd, attn, probs = self.model.predict_action(tokens, hitch_state, self.device, use_expectation=True)
             self.target_steer = steer_cmd
             if attn is not None:
                 self.attention_weights = attn

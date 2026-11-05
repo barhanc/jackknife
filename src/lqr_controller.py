@@ -6,27 +6,22 @@ from src.kinematics import VehicleDimensions
 
 class ReverseLQRController:
     """
-    Stabilized finite/infinite-horizon Riccati LQR controller for multi-trailer reversing.
+    Stabilized finite/infinite-horizon LQR controller for multi-trailer reversing.
     Linearizes hitch dynamics around nominal reversing operating points:
       state error: e = [delta_beta1, delta_beta2]
       control error: u = delta_phi
 
-    Supports domain randomization of (Q, R, max_delta_phi) across training trajectories.
+    Tuned with high steering penalty R=25.0 and balanced Q=diag([3.0, 6.0])
+    to prevent explosive gain peaks and saturated steering slamming on fast chicanes.
     """
-    def __init__(
-        self,
-        dims: Optional[VehicleDimensions] = None,
-        q_diag: Tuple[float, float] = (3.5, 7.0),
-        r_val: float = 18.0,
-        max_delta_phi_deg: float = 22.0
-    ):
+    def __init__(self, dims: Optional[VehicleDimensions] = None):
         self.dims = dims or VehicleDimensions()
-        # State weights on hitch deviations: [delta_beta1, delta_beta2]
-        self.Q = np.diag([q_diag[0], q_diag[1]])
-        # Control weight penalizing steering chatter without sluggishness
-        self.R = np.array([[r_val]])
-        # Maximum allowed perturbation steering offset (+/- 22 degrees)
-        self.max_delta_phi = math.radians(max_delta_phi_deg)
+        # Balanced state weights on hitch deviations: [delta_beta1, delta_beta2]
+        self.Q = np.diag([3.0, 6.0])
+        # High control weight penalizing violent counter-steering
+        self.R = np.array([[25.0]])
+        # Maximum allowed perturbation steering offset (+/- 18 degrees)
+        self.max_delta_phi = math.radians(18.0)
 
     def compute_linearized_matrices(
         self,

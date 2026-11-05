@@ -14,7 +14,6 @@ def main():
     parser.add_argument("--from-scratch", action="store_true", default=True, help="Train model from scratch (do not load old checkpoint)")
     parser.add_argument("--resume", action="store_true", help="Resume from existing checkpoint")
     parser.add_argument("--stream", action="store_true", help="True PFN streaming mode (sample fresh trajectories continuously)")
-    parser.add_argument("--record-presets-every", type=int, default=1, help="Record visual presets every N epochs")
     args = parser.parse_args()
 
     if args.train:
@@ -27,8 +26,7 @@ def main():
             lr=args.lr,
             save_path=args.model_path,
             from_scratch=not args.resume,
-            stream=args.stream,
-            record_presets_every=args.record_presets_every
+            stream=args.stream
         )
     else:
         from src.game import JackknifeGame25D
