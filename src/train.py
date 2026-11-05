@@ -21,7 +21,7 @@ def train_model(
     device_str: Optional[str] = None,
     from_scratch: bool = True,
     stream: bool = True,
-    record_presets_every: int = 5
+    record_presets_every: int = 1
 ):
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
 
