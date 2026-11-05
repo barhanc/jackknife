@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 
 from src.data_generator import SyntheticDataGenerator, ReversingDataset
-from src.model import MultiTrailerPFN, NUM_STEER_CLASSES, STEER_CLASSES_RAD
+from src.model import ControlPFN, NUM_STEER_CLASSES, STEER_CLASSES_RAD
 
 def train_model(
     num_trajectories: int = 60,
@@ -41,7 +41,7 @@ def train_model(
     val_dataset = generator.generate_dataset(num_trajectories=30, perturb_ratio=0.5)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    model = MultiTrailerPFN().to(device)
+    model = ControlPFN().to(device)
     if not from_scratch and os.path.exists(save_path):
         try:
             ckpt = torch.load(save_path, map_location=device)
@@ -53,7 +53,7 @@ def train_model(
         print("Training model from fresh random weights (from scratch).")
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"MultiTrailerPFN architecture initialized ({total_params:,} parameters).")
+    print(f"ControlPFN architecture initialized ({total_params:,} parameters).")
 
     classes_rad = torch.tensor(STEER_CLASSES_RAD, device=device, dtype=torch.float32)
     criterion = nn.CrossEntropyLoss()

@@ -29,9 +29,9 @@ def steer_to_soft_target(phi_rad: float, sigma_deg: float = 4.0) -> np.ndarray:
 
 
 
-class MultiTrailerPFN(nn.Module):
+class ControlPFN(nn.Module):
     """
-    Prior-Data Fitted Network (PFN) for B-Double multi-trailer reversing policy,
+    Prior-Data Fitted Network (ControlPFN) for non-holonomic dynamic trajectory control,
     built with PyTorch's native nn.Transformer and query diagonal masking.
 
     Inputs:
