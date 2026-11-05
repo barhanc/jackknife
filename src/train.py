@@ -227,10 +227,19 @@ def train_model(
 
         if record_presets_every > 0 and (epoch % record_presets_every == 0 or epoch == epochs):
             try:
+                import shutil
                 from record_presets import record_all_presets
                 print(f"\n--- Recording Presets & Visual Runs (Epoch {epoch}) ---")
-                record_all_presets(model_path=save_path, prefix=f"epoch_{epoch}_")
-                record_all_presets(model_path=save_path, prefix="")
+                results = record_all_presets(model_path=save_path, prefix=f"epoch_{epoch}_")
+                for res in results:
+                    img_p = res.get("image_path")
+                    if img_p and os.path.exists(img_p):
+                        dest_png = img_p.replace(f"epoch_{epoch}_", "")
+                        shutil.copyfile(img_p, dest_png)
+                    gif_p = res.get("gif_path")
+                    if gif_p and os.path.exists(gif_p):
+                        dest_gif = gif_p.replace(f"epoch_{epoch}_", "")
+                        shutil.copyfile(gif_p, dest_gif)
             except Exception as ex:
                 print(f"Warning: Failed to record presets at epoch {epoch}: {ex}")
 
