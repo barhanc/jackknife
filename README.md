@@ -1,5 +1,7 @@
 # Jackknife: Autonomous B-Double Reversing with RL-PFNsF
 
+![Showcase](.github/assets/showcase.gif)
+
 ## Quick Start
 
 This repository uses [`uv`](https://docs.astral.sh/uv/) for fast, reproducible
