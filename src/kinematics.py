@@ -162,7 +162,7 @@ class TractorDoubleTrailerKinematics:
         ratio = max(abs(state.beta1) / crit, abs(state.beta2) / crit)
         return max(0.0, 1.0 - ratio)
 
-    def get_body_polygons(self, state: VehicleState) -> Dict[str, np.ndarray]:
+    def get_body_polygons(self, state: VehicleState) -> Dict[str, Any]:
         """
         Computes 2D polygon vertices for rendering Tractor Cab, Trailer 1, and Trailer 2.
         Returns dict with keys: 'cab', 'trailer1', 'trailer2', 'wheels', 'hitches'.

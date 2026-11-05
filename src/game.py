@@ -98,7 +98,7 @@ class TopDownCamera:
         scale_y = (self.height - margin_y) / self.yard_h
         self.scale = min(scale_x, scale_y)
 
-    def fit_to_bounds(self, min_x: float = None, max_x: float = None, min_y: float = None, max_y: float = None, instant: bool = False):
+    def fit_to_bounds(self, min_x: Optional[float] = None, max_x: Optional[float] = None, min_y: Optional[float] = None, max_y: Optional[float] = None, instant: bool = False):
         # Camera center is permanently locked to yard origin (0, 0)
         self.cx = 0.0
         self.cy = 0.0

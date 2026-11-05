@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from typing import Tuple, Optional, Union
+from typing import Tuple, Optional, Union, Any
 
 STEER_CLASSES = [-35.0, -30.0, -25.0, -20.0, -15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0]
 STEER_CLASSES_RAD = [math.radians(deg) for deg in STEER_CLASSES]
@@ -134,7 +134,7 @@ class MultiTrailerPFN(nn.Module):
             for layer in self.transformer.decoder.layers[:-1]:
                 x = layer(x, memory, tgt_mask=tgt_mask.to(tgt.dtype))
 
-            last_layer = self.transformer.decoder.layers[-1]
+            last_layer: Any = self.transformer.decoder.layers[-1]
             x_sa = last_layer.norm1(x + last_layer._sa_block(x, tgt_mask.to(tgt.dtype), None))
             attn_out, attn_weights = last_layer.multihead_attn(
                 x_sa, memory, memory,

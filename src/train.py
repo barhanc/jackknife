@@ -63,6 +63,7 @@ def train_model(
     best_val_acc = 0.0
 
     # If not streaming, generate a single static training set
+    train_loader: Optional[DataLoader] = None
     if not stream:
         print(f"Generating static training set ({num_trajectories} trajectories)...")
         train_dataset = generator.generate_dataset(num_trajectories=num_trajectories)
@@ -92,6 +93,7 @@ def train_model(
         else:
             gen_time = 0.0
 
+        assert train_loader is not None
         model.train()
         train_loss = 0.0
         train_correct = 0
