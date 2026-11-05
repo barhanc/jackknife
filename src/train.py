@@ -65,7 +65,7 @@ def train_model(
     # If not streaming, generate a single static training set
     if not stream:
         print(f"Generating static training set ({num_trajectories} trajectories)...")
-        train_dataset = generator.generate_dataset(num_trajectories=num_trajectories, perturb_ratio=0.5)
+        train_dataset = generator.generate_dataset(num_trajectories=num_trajectories)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
     metrics_history = []
@@ -86,7 +86,7 @@ def train_model(
         if stream:
             # True PFN dynamic sampling: sample fresh trajectories every epoch
             t_gen = time.time()
-            train_dataset = generator.generate_dataset(num_trajectories=num_trajectories, perturb_ratio=0.5)
+            train_dataset = generator.generate_dataset(num_trajectories=num_trajectories)
             train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
             gen_time = time.time() - t_gen
         else:
