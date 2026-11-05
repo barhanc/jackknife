@@ -162,28 +162,6 @@ class MultiTrailerPFN(nn.Module):
         return out
 
     @torch.no_grad()
-    def predict_proba(
-        self,
-        tokens: torch.Tensor,
-        hitch_state: torch.Tensor,
-        temperature: float = 1.5
-    ) -> torch.Tensor:
-        """
-        Returns temperature-scaled softmax probability distribution over steering action classes.
-        Temperature scaling preserves continuous physical damping and eliminates steering chatter.
-        """
-        self.eval()
-        if tokens.ndim == 2:
-            tokens = tokens.unsqueeze(0)
-        if hitch_state.ndim == 1:
-            hitch_state = hitch_state.unsqueeze(0)
-
-        out = self(tokens, hitch_state)
-        if isinstance(out, tuple):
-            out = out[0]
-        temp = max(float(temperature), 1e-4)
-        return F.softmax(out / temp, dim=-1)
-
     def predict_action(
         self,
         tokens_np: np.ndarray,
@@ -200,23 +178,22 @@ class MultiTrailerPFN(nn.Module):
             probs: (num_classes,) probability distribution
         """
         self.eval()
-        with torch.no_grad():
-            t_tok = torch.from_numpy(tokens_np).float().unsqueeze(0).to(device)
-            t_state = torch.from_numpy(hitch_state_np).float().unsqueeze(0).to(device)
+        t_tok = torch.from_numpy(tokens_np).float().unsqueeze(0).to(device)
+        t_state = torch.from_numpy(hitch_state_np).float().unsqueeze(0).to(device)
 
-            logits, attn = self(t_tok, t_state, return_attention=True)
-            temp = max(float(temperature), 1e-4)
-            probs = F.softmax(logits / temp, dim=-1).cpu().numpy()[0]
+        logits, attn = self(t_tok, t_state, return_attention=True)
+        temp = max(float(temperature), 1e-4)
+        probs = F.softmax(logits / temp, dim=-1).cpu().numpy()[0]
 
-            if use_expectation:
-                # Softmax expected value: eliminates quantization chatter
-                steer_rad = float(np.sum(probs * np.array(STEER_CLASSES_RAD)))
-            else:
-                best_idx = int(np.argmax(probs))
-                steer_rad = class_idx_to_steer(best_idx)
+        if use_expectation:
+            # Softmax expected value: eliminates quantization chatter
+            steer_rad = float(np.sum(probs * np.array(STEER_CLASSES_RAD)))
+        else:
+            best_idx = int(np.argmax(probs))
+            steer_rad = class_idx_to_steer(best_idx)
 
-            if attn is not None:
-                attn_weights = attn.cpu().numpy()[0]
-            else:
-                attn_weights = np.ones(tokens_np.shape[0], dtype=np.float32) / float(tokens_np.shape[0])
-            return steer_rad, attn_weights, probs
+        if attn is not None:
+            attn_weights = attn.cpu().numpy()[0]
+        else:
+            attn_weights = np.ones(tokens_np.shape[0], dtype=np.float32) / float(tokens_np.shape[0])
+        return steer_rad, attn_weights, probs
