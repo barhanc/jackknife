@@ -10,14 +10,24 @@ class ReverseLQRController:
     Uses continuous Riccati optimal feedback for small/moderate tracking errors,
     paired with strict non-linear priority protection when articulation angles approach danger boundaries.
     """
-    def __init__(self, dims: Optional[VehicleDimensions] = None):
+    def __init__(
+        self,
+        dims: Optional[VehicleDimensions] = None,
+        q_diag: Tuple[float, float] = (4.0, 8.0),
+        r_val: float = 8.0,
+        max_delta_phi_deg: float = 28.0,
+        inflection_b2_deg: float = 26.0,
+        emergency_b2_deg: float = 44.0
+    ):
         self.dims = dims or VehicleDimensions()
-        # Balanced weights on articulation angles: [delta_beta1, delta_beta2]
-        self.Q = np.diag([4.0, 8.0])
-        # Balanced control weight (R=8.0 prevents both gain explosion and sluggish under-steering)
-        self.R = np.array([[8.0]])
-        # Maximum allowed perturbation steering offset (+/- 22 degrees)
-        self.max_delta_phi = math.radians(28.0)
+        # Weights on articulation angles: [delta_beta1, delta_beta2]
+        self.Q = np.diag([q_diag[0], q_diag[1]])
+        # Control weight
+        self.R = np.array([[r_val]])
+        # Maximum allowed perturbation steering offset
+        self.max_delta_phi = math.radians(max_delta_phi_deg)
+        self.inflection_b2_rad = math.radians(inflection_b2_deg)
+        self.emergency_b2_rad = math.radians(emergency_b2_deg)
 
     def compute_linearized_matrices(
         self,
@@ -109,8 +119,8 @@ class ReverseLQRController:
         # We invoke cascaded outer/inner loop control:
         # 1. Outer loop sets the safe target articulation for Trailer 1 (b1_ref) needed to stabilize Trailer 2.
         # 2. Inner loop steers the tractor cab to track b1_ref without overshooting.
-        is_severe_inflection = (actual_beta1 * actual_beta2 < -0.05) and (abs(actual_beta2) > math.radians(26.0))
-        is_near_jackknife = abs(actual_beta2) > math.radians(44.0)
+        is_severe_inflection = (actual_beta1 * actual_beta2 < -0.05) and (abs(actual_beta2) > self.inflection_b2_rad)
+        is_near_jackknife = abs(actual_beta2) > self.emergency_b2_rad
         if is_severe_inflection or is_near_jackknife:
             sin_b1_eq = (self.dims.L1 / self.dims.L2) * math.sin(nominal_beta2)
             sin_b1_cmd = sin_b1_eq + 1.2 * e2

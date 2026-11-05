@@ -145,15 +145,20 @@ class SyntheticDataGenerator:
     def extract_reversing_samples(
         self,
         forward_history: List[Dict[str, Any]],
-        perturb_ratio: float = 0.5
+        perturb_ratio: float = 0.5,
+        lqr_controller: Optional[ReverseLQRController] = None,
+        c_y: Optional[float] = None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Applies time-reversal to forward history and extracts (tokens, hitch_state, steer_class).
-        Injects tuned LQR perturbation recovery funnels.
+        Injects tuned LQR perturbation recovery funnels with optional randomized teacher persona.
         """
         N = len(forward_history)
         if N < 50:
             return np.zeros((0, 64, 7), dtype=np.float32), np.zeros((0, 4), dtype=np.float32), np.zeros((0, 15), dtype=np.float32)
+
+        lqr = lqr_controller or self.lqr
+        restoring_cy = c_y if c_y is not None else 0.18
 
         t2_x = np.array([h['t2_axle'][0] for h in forward_history])
         t2_y = np.array([h['t2_axle'][1] for h in forward_history])
@@ -225,7 +230,7 @@ class SyntheticDataGenerator:
                 perturbed_b2 = float(np.clip(perturbed_b2, -limit_rad, limit_rad))
 
                 # Stabilized LQR corrective steering
-                phi_star = self.lqr.corrective_steering(
+                phi_star = lqr.corrective_steering(
                     nominal_phi=nominal_phi,
                     nominal_beta1=state.beta1,
                     nominal_beta2=state.beta2,
@@ -268,8 +273,7 @@ class SyntheticDataGenerator:
 
                 # Corrective curvature: steer trailer 2 towards centerline
                 y_rel_off = float(tokens_off[0, 1])
-                c_y = 0.22  # rad per meter (crisp restoring stiffness)
-                delta_b2_des = float(np.clip(c_y * y_rel_off, -math.radians(35.0), math.radians(35.0)))
+                delta_b2_des = float(np.clip(restoring_cy * y_rel_off, -math.radians(35.0), math.radians(35.0)))
 
                 b2_target = state.beta2 + delta_b2_des
                 b1_target = state.beta1 + (self.dims.L1 / self.dims.L2) * delta_b2_des
@@ -281,7 +285,7 @@ class SyntheticDataGenerator:
                 act_b1 = float(np.clip(act_b1, -limit_rad, limit_rad))
                 act_b2 = float(np.clip(act_b2, -limit_rad, limit_rad))
 
-                phi_star_off = self.lqr.corrective_steering(
+                phi_star_off = lqr.corrective_steering(
                     nominal_phi=phi_target,
                     nominal_beta1=b1_target,
                     nominal_beta2=b2_target,
@@ -337,8 +341,31 @@ class SyntheticDataGenerator:
             else:
                 length = float(np.random.uniform(65.0, 100.0))
 
+            # Domain Randomization: Sample teacher persona for this trajectory
+            q1 = float(np.random.uniform(3.0, 6.0))
+            q2 = float(np.random.uniform(6.0, 12.0))
+            r_val = float(np.random.uniform(6.0, 10.0))
+            max_delta_deg = float(np.random.uniform(22.0, 30.0))
+            inflection_b2 = float(np.random.uniform(20.0, 30.0))
+            emergency_b2 = float(np.random.uniform(36.0, 48.0))
+            cy_sample = float(np.random.uniform(0.12, 0.24))
+
+            traj_lqr = ReverseLQRController(
+                dims=self.dims,
+                q_diag=(q1, q2),
+                r_val=r_val,
+                max_delta_phi_deg=max_delta_deg,
+                inflection_b2_deg=inflection_b2,
+                emergency_b2_deg=emergency_b2
+            )
+
             hist = self.generate_single_trajectory(path_type=ptype, length_m=length)
-            toks, sts, cls = self.extract_reversing_samples(hist, perturb_ratio=perturb_ratio)
+            toks, sts, cls = self.extract_reversing_samples(
+                hist,
+                perturb_ratio=perturb_ratio,
+                lqr_controller=traj_lqr,
+                c_y=cy_sample
+            )
 
             if len(cls) > 0:
                 all_tokens.append(toks)
