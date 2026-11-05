@@ -63,25 +63,25 @@ def compute_flatness_states(path: Path, dims: VehicleDimensions) -> Tuple[np.nda
     k2 = path.curvatures.astype(np.float64)
     dk2_ds2 = np.gradient(k2, s2)
 
-    # 1. Trailer 2 -> Trailer 1 Flatness Map
-    tan_b2 = dims.L2 * k2
+    # 1. Trailer 2 -> Trailer 1 Flatness Map (Reversing kinematics: v0 < 0)
+    tan_b2 = -dims.L2 * k2
     b2 = np.arctan(tan_b2)
     cos_b2 = np.cos(b2)
-    db2_ds2 = (dims.L2 * dk2_ds2) / (1.0 + tan_b2**2)
+    db2_ds2 = (-dims.L2 * dk2_ds2) / (1.0 + tan_b2**2)
 
     # 2. Trailer 1 -> Tractor Axle Flatness Map
     k1 = cos_b2 * (k2 + db2_ds2)
-    tan_b1 = dims.L1 * k1
+    tan_b1 = -dims.L1 * k1
     b1 = np.arctan(tan_b1)
     cos_b1 = np.cos(b1)
 
     s1 = np.cumsum(np.maximum(0.1, cos_b2) * ds)
     dk1_ds1 = np.gradient(k1, s1)
-    db1_ds1 = (dims.L1 * dk1_ds1) / (1.0 + tan_b1**2)
+    db1_ds1 = (-dims.L1 * dk1_ds1) / (1.0 + tan_b1**2)
 
     # 3. Tractor Axle -> Front Steer Wheel Flatness Map
     k0 = cos_b1 * (k1 + db1_ds1)
-    tan_phi = dims.L0 * k0
+    tan_phi = -dims.L0 * k0
 
     phi = np.clip(np.arctan(tan_phi), -dims.max_steer_rad, dims.max_steer_rad).astype(np.float32)
     b1 = np.clip(b1, -dims.crit_hitch_rad * 0.95, dims.crit_hitch_rad * 0.95).astype(np.float32)

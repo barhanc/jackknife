@@ -162,7 +162,7 @@ class ControlPFN(nn.Module):
         hitch_state_np: np.ndarray,
         device: torch.device,
         use_expectation: bool = True,
-        temperature: float = 1.5
+        temperature: float = 1.0
     ) -> Tuple[float, np.ndarray, np.ndarray]:
         """
         Single-sample runtime inference helper for game simulation execution.
