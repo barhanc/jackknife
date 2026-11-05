@@ -3,7 +3,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
+from torch import Tensor
+from typing import Tuple, Optional, Union
 
 STEER_CLASSES = [-35.0, -30.0, -25.0, -20.0, -15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0]
 STEER_CLASSES_RAD = [math.radians(deg) for deg in STEER_CLASSES]
@@ -20,155 +21,264 @@ def class_idx_to_steer(idx: int) -> float:
     return STEER_CLASSES_RAD[idx]
 
 
-class MultiTrailerPFN(nn.Module):
+class BernoulliPFN(nn.Module):
     """
-    In-Context Policy Network (Transformer Policy) for B-Double multi-trailer reversing.
-    
-    Inputs:
-        tokens: (B, 32, 7) - Egocentric lookahead path stations in Trailer 2 local frame
-                [x_rel, y_rel, cos(theta_rel), sin(theta_rel), kappa, w_L, w_R]
-        hitch_state: (B, 4) - Trailer hitch angles [sin(beta1), cos(beta1), sin(beta2), cos(beta2)]
-        
-    Outputs:
-        logits: (B, 15) - Discrete steering angle classification logits
-        attn_weights: (B, 32) - Cross-attention weights over the 32 path tokens
+    Reference Tabular Prior-Data Fitted Network (PFN) using PyTorch's native nn.Transformer.
+    Evaluates query points independently against encoded support contexts via diagonal masking.
     """
     def __init__(
         self,
-        d_model: int = 256,
-        nhead: int = 8,
-        d_ff: int = 1024,
+        num_features: int,
+        dim_model: int = 256,
+        dim_feedforward: int = 1024,
+        num_heads: int = 8,
         num_encoder_layers: int = 6,
-        num_cross_layers: int = 3,
-        num_tokens: int = 64,
-        token_dim: int = 7,
-        state_dim: int = 4,
-        num_classes: int = 15,
-        dropout: float = 0.0
+        num_decoder_layers: int = 2,
     ):
         super().__init__()
-        self.d_model = d_model
+
+        self.num_features = num_features
+
+        self.map_src_X = nn.Linear(num_features, dim_model)
+        self.map_tgt_X = nn.Linear(num_features, dim_model)
+        self.map_src_y = nn.Linear(1, dim_model)
+        self.map_out = nn.Sequential(
+            nn.Linear(dim_model, dim_feedforward),
+            nn.GELU(),
+            nn.Linear(dim_feedforward, 1),
+        )
+
+        self.transformer = nn.Transformer(
+            d_model=dim_model,
+            nhead=num_heads,
+            num_encoder_layers=num_encoder_layers,
+            num_decoder_layers=num_decoder_layers,
+            dim_feedforward=dim_feedforward,
+            activation="gelu",
+            batch_first=True,
+        )
+
+    def forward(self, X_train: Tensor, y_train: Tensor, X_query: Tensor) -> Tensor:
+        """
+        Args:
+            X_train (Tensor): Shape `(batch_size, train_size, num_features)`
+            y_train (Tensor): Shape `(batch_size, train_size, 1)`
+            X_query (Tensor): Shape `(batch_size, query_size, num_features)`
+
+        Returns:
+            Tensor: Shape `(batch_size, query_size, 1)`
+        """
+        assert X_train.ndim == 3
+        assert y_train.ndim == 3
+        assert X_query.ndim == 3
+        assert X_train.size(0) == y_train.size(0) == X_query.size(0)
+        assert X_train.size(2) == X_query.size(2) == self.num_features
+        assert X_train.size(1) == y_train.size(1)
+        assert y_train.size(2) == 1
+
+        query_size = X_query.size(1)
+
+        tgt_mask = -torch.eye(query_size, device=X_query.device) + 1.0
+        tgt_mask[tgt_mask == 1.0] = float('-inf')
+
+        src = self.map_src_X(X_train) + self.map_src_y(y_train)
+        tgt = self.map_tgt_X(X_query)
+        out = self.transformer(src, tgt, tgt_mask=tgt_mask.to(tgt.dtype))
+        out = self.map_out(out)
+
+        return out
+
+    @torch.no_grad()
+    def predict_proba(self, X_train: Tensor, y_train: Tensor, X_query: Tensor) -> Tensor:
+        """
+        Args:
+            X_train (Tensor): Shape `(train_size, num_features)`
+            y_train (Tensor): Shape `(train_size, 1)`
+            X_query (Tensor): Shape `(query_size, num_features)`
+
+        Returns:
+            Tensor: Shape `(query_size, 1)`
+        """
+        self.eval()
+
+        X_train = X_train.unsqueeze(0)
+        y_train = y_train.unsqueeze(0)
+        X_query = X_query.unsqueeze(0)
+
+        logits: Tensor = self(X_train, y_train, X_query)
+
+        return logits.sigmoid().squeeze(0)
+
+    def predict(self, X_train: Tensor, y_train: Tensor, X_query: Tensor, threshold: float = 0.5) -> Tensor:
+        """
+        Args:
+            X_train (Tensor): Shape `(train_size, num_features)`
+            y_train (Tensor): Shape `(train_size, 1)`
+            X_query (Tensor): Shape `(query_size, num_features)`
+            threshold (float): Probability threshold for binary classification.
+
+        Returns:
+            Tensor: Shape `(query_size, 1)`
+        """
+        assert 0.0 < threshold < 1.0
+        return self.predict_proba(X_train, y_train, X_query) > threshold
+
+
+class MultiTrailerPFN(nn.Module):
+    """
+    Prior-Data Fitted Network (PFN) for B-Double multi-trailer reversing policy,
+    built with PyTorch's native nn.Transformer and query diagonal masking.
+
+    Inputs:
+        tokens: (B, num_tokens, token_dim) - Egocentric lookahead path stations in Trailer 2 frame
+                [x_rel, y_rel, cos(theta_rel), sin(theta_rel), kappa, w_L, w_R]
+        hitch_state: (B, state_dim) or (B, query_size, state_dim) - Rig articulation state
+                [sin(beta1), cos(beta1), sin(beta2), cos(beta2)]
+
+    Outputs:
+        logits: (B, num_classes) or (B, query_size, num_classes) - Steering action logits
+    """
+    def __init__(
+        self,
+        token_dim: int = 7,
+        state_dim: int = 4,
+        num_classes: int = NUM_STEER_CLASSES,
+        dim_model: int = 256,
+        dim_feedforward: int = 1024,
+        num_heads: int = 8,
+        num_encoder_layers: int = 6,
+        num_decoder_layers: int = 2,
+        num_tokens: int = 64,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.token_dim = token_dim
+        self.state_dim = state_dim
+        self.num_classes = num_classes
+        self.dim_model = dim_model
+        self.dim_feedforward = dim_feedforward
         self.num_tokens = num_tokens
 
-        # Context Encoder projections
-        self.token_proj = nn.Linear(token_dim, d_model)
-        self.pos_embed = nn.Parameter(torch.randn(1, num_tokens, d_model) * 0.02)
+        # Feature projections for memory (path tokens) and query (hitch state)
+        self.map_src = nn.Linear(token_dim, dim_model)
+        self.map_tgt = nn.Linear(state_dim, dim_model)
+        self.pos_embed = nn.Parameter(torch.randn(1, num_tokens, dim_model) * 0.02)
 
-        # Transformer Encoder for path context
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=d_ff,
+        # PyTorch Built-in Transformer
+        self.transformer = nn.Transformer(
+            d_model=dim_model,
+            nhead=num_heads,
+            num_encoder_layers=num_encoder_layers,
+            num_decoder_layers=num_decoder_layers,
+            dim_feedforward=dim_feedforward,
             dropout=dropout,
             activation="gelu",
-            batch_first=True
+            batch_first=True,
         )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
-
-        # Hitch state query projection
-        self.state_proj = nn.Sequential(
-            nn.Linear(state_dim, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, d_model)
-        )
-
-        # Cross-Attention Layers (Query attends to Path Memory)
-        self.cross_attn1 = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, batch_first=True)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.cross_ff1 = nn.Sequential(
-            nn.Linear(d_model, d_ff),
-            nn.GELU(),
-            nn.Linear(d_ff, d_model)
-        )
-        self.norm_ff1 = nn.LayerNorm(d_model)
-
-        self.cross_attn2 = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, batch_first=True)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.cross_ff2 = nn.Sequential(
-            nn.Linear(d_model, d_ff),
-            nn.GELU(),
-            nn.Linear(d_ff, d_model)
-        )
-        self.norm_ff2 = nn.LayerNorm(d_model)
 
         # Policy MLP Head
-        self.head = nn.Sequential(
-            nn.Linear(d_model, 64),
+        self.map_out = nn.Sequential(
+            nn.Linear(dim_model, dim_feedforward),
             nn.GELU(),
-            nn.Linear(64, num_classes)
+            nn.Linear(dim_feedforward, num_classes),
         )
 
     def forward(
         self,
         tokens: torch.Tensor,
         hitch_state: torch.Tensor,
-        return_attention: bool = True
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return_attention: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """
-        tokens: (B, 32, 7)
-        hitch_state: (B, 4)
+        Args:
+            tokens (Tensor): Shape `(batch_size, num_tokens, token_dim)`
+            hitch_state (Tensor): Shape `(batch_size, state_dim)` or `(batch_size, query_size, state_dim)`
+            return_attention (bool): Optional flag for compatibility with tuple unpacking callers.
+
+        Returns:
+            Tensor or Tuple[Tensor, None]: Action logits `(batch_size, num_classes)`
         """
-        B = tokens.size(0)
+        assert tokens.ndim == 3, f"Expected tokens ndim == 3, got {tokens.ndim}"
 
-        # Encode path tokens
-        x = self.token_proj(tokens) + self.pos_embed  # (B, 32, d_model)
-        memory = self.encoder(x)                      # (B, 32, d_model)
+        is_2d_query = (hitch_state.ndim == 2)
+        X_query = hitch_state.unsqueeze(1) if is_2d_query else hitch_state
 
-        # Encode hitch state as query
-        q = self.state_proj(hitch_state).unsqueeze(1) # (B, 1, d_model)
+        assert tokens.size(0) == X_query.size(0), "Batch sizes must match"
+        assert tokens.size(2) == self.token_dim, f"Token dim mismatch: expected {self.token_dim}, got {tokens.size(2)}"
+        assert X_query.size(2) == self.state_dim, f"State dim mismatch: expected {self.state_dim}, got {X_query.size(2)}"
 
-        # Cross-attention layer 1
-        attn_out1, _ = self.cross_attn1(query=q, key=memory, value=memory)
-        q = self.norm1(q + attn_out1)
-        q = self.norm_ff1(q + self.cross_ff1(q))
+        query_size = X_query.size(1)
 
-        # Cross-attention layer 2 (capture attention weights)
-        attn_out2, attn_weights = self.cross_attn2(
-            query=q, key=memory, value=memory,
-            need_weights=return_attention,
-            average_attn_weights=True
-        )
-        q = self.norm2(q + attn_out2)
-        q = self.norm_ff2(q + self.cross_ff2(q)) # (B, 1, d_model)
+        # Diagonal mask: queries evaluate independently, attending only to self and encoder memory
+        tgt_mask = -torch.eye(query_size, device=X_query.device) + 1.0
+        tgt_mask[tgt_mask == 1.0] = float('-inf')
 
-        # Predict steering logits
-        q_squeezed = q.squeeze(1) # (B, d_model)
-        logits = self.head(q_squeezed) # (B, 15)
+        # Encode trajectory context
+        src = self.map_src(tokens)
+        if self.pos_embed is not None and tokens.size(1) <= self.pos_embed.size(1):
+            src = src + self.pos_embed[:, :tokens.size(1), :]
 
-        if return_attention and attn_weights is not None:
-            # attn_weights shape: (B, 1, 32) -> squeeze to (B, 32)
-            attn_weights = attn_weights.squeeze(1)
-            return logits, attn_weights
-        return logits, None
+        # Query vehicle articulation state
+        tgt = self.map_tgt(X_query)
+
+        # PyTorch Built-in Transformer execution
+        out = self.transformer(src, tgt, tgt_mask=tgt_mask.to(tgt.dtype))
+        out = self.map_out(out)
+
+        if is_2d_query:
+            out = out.squeeze(1)
+
+        if return_attention:
+            return out, None
+        return out
+
+    @torch.no_grad()
+    def predict_proba(
+        self,
+        tokens: torch.Tensor,
+        hitch_state: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Returns softmax probability distribution over steering action classes.
+        """
+        self.eval()
+        if tokens.ndim == 2:
+            tokens = tokens.unsqueeze(0)
+        if hitch_state.ndim == 1:
+            hitch_state = hitch_state.unsqueeze(0)
+
+        out = self(tokens, hitch_state)
+        if isinstance(out, tuple):
+            out = out[0]
+        return F.softmax(out, dim=-1)
 
     def predict_action(
         self,
-        tokens_np,
-        hitch_state_np,
+        tokens_np: np.ndarray,
+        hitch_state_np: np.ndarray,
         device: torch.device,
         use_expectation: bool = True
     ) -> Tuple[float, np.ndarray, np.ndarray]:
         """
-        Convenience inference helper for single-sample runtime execution.
+        Single-sample runtime inference helper for game simulation execution.
         Returns:
-            steer_rad: continuous steering angle corresponding to argmax / expectation
-            attention_weights: (num_tokens,) numpy array
-            probs: (15,) action probabilities distribution numpy array
+            steer_rad: Continuous steering angle (via expectation or argmax)
+            attn_weights: (num_tokens,) uniform array
+            probs: (num_classes,) probability distribution
         """
         self.eval()
         with torch.no_grad():
             t_tok = torch.from_numpy(tokens_np).float().unsqueeze(0).to(device)
             t_state = torch.from_numpy(hitch_state_np).float().unsqueeze(0).to(device)
 
-            logits, attn = self(t_tok, t_state, return_attention=True)
-            probs = F.softmax(logits, dim=-1).cpu().numpy()[0]
-            
+            probs = self.predict_proba(t_tok, t_state).cpu().numpy()[0]
+
             if use_expectation:
-                # Continuous softmax expected value: eliminates quantization dither
+                # Softmax expected value: eliminates quantization chatter
                 steer_rad = float(np.sum(probs * np.array(STEER_CLASSES_RAD)))
             else:
                 best_idx = int(np.argmax(probs))
                 steer_rad = class_idx_to_steer(best_idx)
-            
-            attn_weights = attn.cpu().numpy()[0] if attn is not None else np.ones(t_tok.shape[1]) / float(t_tok.shape[1])
+
+            attn_weights = np.ones(tokens_np.shape[0], dtype=np.float32) / float(tokens_np.shape[0])
             return steer_rad, attn_weights, probs

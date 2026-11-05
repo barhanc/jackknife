@@ -100,7 +100,8 @@ def train_model(
             tokens, hitch_state, targets = tokens.to(device), hitch_state.to(device), targets.to(device)
 
             optimizer.zero_grad()
-            logits, _ = model(tokens, hitch_state, return_attention=False)
+            res = model(tokens, hitch_state)
+            logits = res[0] if isinstance(res, tuple) else res
             loss = criterion(logits, targets)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -125,7 +126,8 @@ def train_model(
             for tokens, hitch_state, targets in val_loader:
                 tokens, hitch_state, targets = tokens.to(device), hitch_state.to(device), targets.to(device)
 
-                logits, _ = model(tokens, hitch_state, return_attention=False)
+                res = model(tokens, hitch_state)
+                logits = res[0] if isinstance(res, tuple) else res
                 loss = criterion(logits, targets)
 
                 val_loss += loss.item() * len(targets)
