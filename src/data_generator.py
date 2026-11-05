@@ -6,7 +6,6 @@ from typing import List, Tuple, Dict, Any, Optional
 
 from src.kinematics import TractorDoubleTrailerKinematics, VehicleDimensions, VehicleState
 from src.path_generator import Path, generate_synthetic_path
-from src.lqr_controller import ReverseLQRController
 from src.model import steer_to_soft_target
 
 PATH_TYPES = [
@@ -61,41 +60,108 @@ class ReversingDataset(Dataset):
 
 class SyntheticDataGenerator:
     """
-    Generates training data via closed-form time-reversal of forward trajectories
-    plus tuned LQR contraction funnel perturbations.
+    Pure-Path / No-Teacher Synthetic Data Generator for Multi-Trailer Reversing.
+    
+    Eliminates heuristic teacher controllers (LQR, cascade clamps, hand-tuned gains).
+    Uses 100% physically exact kinematic time-reversal:
+      - Nominal Trajectories: forward rollouts on 27 path families time-reversed for
+        exact centerline following and high-curvature holding (up to beta2 ~ 45 deg).
+      - Merging Trajectories: forward rollouts on feeder paths peeling off from main roads.
+        In time-reversal, Trailer 2 starts off-track (y_rel != 0, dtheta != 0) and
+        naturally executes the non-linear multi-body counter-steer maneuver that merges
+        onto the main target road with zero terminal error.
     """
     def __init__(self, dims: Optional[VehicleDimensions] = None):
         self.dims = dims or VehicleDimensions()
         self.kinematics = TractorDoubleTrailerKinematics(self.dims)
-        self.lqr = ReverseLQRController(self.dims)
+
+    def build_feeder_and_main_paths(
+        self,
+        length_m: float = 80.0,
+        ds: float = 0.8,
+        path_type: str = "s_curve",
+        merge_type: str = "nominal",
+        max_offset: float = 1.5
+    ) -> Tuple[Path, Path]:
+        """
+        Builds a main target path and an associated feeder rollout path.
+        """
+        main_path = generate_synthetic_path(length_m=length_m, ds=ds, path_type=path_type)
+        N = len(main_path.x)
+        if N < 25 or merge_type == "nominal":
+            return main_path, main_path
+
+        offset_profile = np.zeros(N)
+
+        if merge_type == "peel_off":
+            # Forward starts on path, peels off to max_offset at end.
+            # In reverse: Trailer 2 starts off-track by max_offset, smoothly merges to path!
+            split_idx = int(N * np.random.uniform(0.15, 0.40))
+            ramp_len = N - split_idx
+            s_norm = np.linspace(0.0, 1.0, ramp_len)
+            smooth_ramp = (3.0 * (s_norm**2) - 2.0 * (s_norm**3)) * max_offset
+            offset_profile[split_idx:] = smooth_ramp
+
+        elif merge_type == "lane_change":
+            # Forward transitions from -max_offset/2 across 0 to +max_offset/2.
+            # In reverse: transitions across the main road centerline.
+            s_norm = np.linspace(0.0, 1.0, N)
+            smooth_ramp = (3.0 * (s_norm**2) - 2.0 * (s_norm**3)) * max_offset - (max_offset * 0.5)
+            offset_profile[:] = smooth_ramp
+
+        elif merge_type == "angled_merge":
+            # Forward starts offset and merges onto main path.
+            # In reverse: Trailer 2 starts on main path and diverges onto offset angled track.
+            split_idx = int(N * np.random.uniform(0.30, 0.60))
+            s_norm = np.linspace(0.0, 1.0, split_idx)
+            smooth_ramp = (1.0 - (3.0 * (s_norm**2) - 2.0 * (s_norm**3))) * max_offset
+            offset_profile[:split_idx] = smooth_ramp
+            offset_profile[split_idx:] = 0.0
+
+        normals_x = -np.sin(main_path.headings)
+        normals_y = np.cos(main_path.headings)
+        feeder_x = main_path.x + offset_profile * normals_x
+        feeder_y = main_path.y + offset_profile * normals_y
+
+        feeder_path = Path(feeder_x, feeder_y, ds=ds)
+        return main_path, feeder_path
 
     def generate_single_trajectory(
         self,
         path_type: str = "smooth_random",
         length_m: float = 75.0,
         dt: float = 0.05,
-        v_forward: float = 1.5
-    ) -> List[Dict[str, Any]]:
+        v_forward: float = 1.5,
+        merge_type: str = "nominal",
+        max_offset: float = 1.5
+    ) -> Tuple[List[Dict[str, Any]], Path]:
         """
-        Rolls out forward trajectory following a smooth path, recording states.
+        Rolls out forward trajectory following feeder_path, recording kinematically exact states.
+        Returns the recorded history along with the main target path.
         """
-        path = generate_synthetic_path(length_m=length_m, ds=0.8, path_type=path_type)
-        if len(path.x) < 20:
-            return []
+        main_path, feeder_path = self.build_feeder_and_main_paths(
+            length_m=length_m,
+            ds=0.8,
+            path_type=path_type,
+            merge_type=merge_type,
+            max_offset=max_offset
+        )
+        if len(feeder_path.x) < 20:
+            return [], main_path
 
         rng = np.random.default_rng()
-        b1_init = float(rng.uniform(-0.06, 0.06)) if rng.random() < 0.6 else 0.0
-        b2_init = float(rng.uniform(-0.06, 0.06)) if rng.random() < 0.6 else 0.0
+        b1_init = float(rng.uniform(-0.06, 0.06)) if rng.random() < 0.5 else 0.0
+        b2_init = float(rng.uniform(-0.06, 0.06)) if rng.random() < 0.5 else 0.0
         state = VehicleState(
-            x0=path.x[0],
-            y0=path.y[0],
-            theta0=path.headings[0],
+            x0=feeder_path.x[0],
+            y0=feeder_path.y[0],
+            theta0=feeder_path.headings[0],
             beta1=b1_init,
             beta2=b2_init,
             phi=0.0
         )
 
-        steps = int((length_m - 15.0) / (v_forward * dt))
+        steps = int((feeder_path.total_length - 12.0) / (v_forward * dt))
         history: List[Dict[str, Any]] = []
 
         lookahead_dist = 4.5
@@ -106,10 +172,10 @@ class SyntheticDataGenerator:
             fx = state.x0 + self.dims.L0 * cos_t0
             fy = state.y0 + self.dims.L0 * sin_t0
 
-            fwd_nearest_idx, _ = path.update_progression(fx, fy, fwd_nearest_idx)
-            target_idx = min(len(path.x) - 1, fwd_nearest_idx + int(lookahead_dist / path.ds))
-            gx = path.x[target_idx]
-            gy = path.y[target_idx]
+            fwd_nearest_idx, _ = feeder_path.update_progression(fx, fy, fwd_nearest_idx)
+            target_idx = min(len(feeder_path.x) - 1, fwd_nearest_idx + int(lookahead_dist / feeder_path.ds))
+            gx = feeder_path.x[target_idx]
+            gy = feeder_path.y[target_idx]
 
             dx = gx - fx
             dy = gy - fy
@@ -118,7 +184,7 @@ class SyntheticDataGenerator:
 
             dist_to_goal = math.hypot(local_x, local_y)
             if dist_to_goal < 0.5:
-                alpha = path.headings[target_idx] - state.theta0
+                alpha = feeder_path.headings[target_idx] - state.theta0
                 alpha = math.atan2(math.sin(alpha), math.cos(alpha))
                 target_phi = math.atan2(2.0 * self.dims.L0 * math.sin(alpha), lookahead_dist)
             else:
@@ -126,7 +192,6 @@ class SyntheticDataGenerator:
 
             target_phi = max(-self.dims.max_steer_rad, min(self.dims.max_steer_rad, target_phi))
 
-            x1, y1, th1 = self.kinematics.get_trailer1_axle(state)
             x2, y2, th2 = self.kinematics.get_trailer2_axle(state)
 
             history.append({
@@ -137,47 +202,50 @@ class SyntheticDataGenerator:
             })
 
             state = self.kinematics.step_rk4(state, v0=v_forward, target_phi=target_phi, dt=dt)
-            if self.kinematics.is_jackknifed(state):
+            if self.kinematics.is_jackknifed(state) or abs(state.beta1) > math.radians(55.0) or abs(state.beta2) > math.radians(55.0):
                 break
 
-        return history
+        return history, main_path
 
     def extract_reversing_samples(
         self,
         forward_history: List[Dict[str, Any]],
-        perturb_ratio: float = 0.5
+        main_path: Path
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Applies time-reversal to forward history and extracts (tokens, hitch_state, steer_class).
-        Injects tuned LQR perturbation recovery funnels.
+        Lookahead tokens are evaluated against the reversed main target path, naturally
+        teaching both centerline tracking and off-track re-centering without a teacher.
         """
         N = len(forward_history)
         if N < 50:
             return np.zeros((0, 64, 7), dtype=np.float32), np.zeros((0, 4), dtype=np.float32), np.zeros((0, 15), dtype=np.float32)
 
-        t2_x = np.array([h['t2_axle'][0] for h in forward_history])
-        t2_y = np.array([h['t2_axle'][1] for h in forward_history])
+        # Track progression along main_path throughout forward rollout to find true terminal station
+        m_idx = 0
+        for entry in forward_history:
+            x2, y2, _ = entry['t2_axle']
+            m_idx, _ = main_path.update_progression(x2, y2, m_idx)
 
-        rev_t2_x = t2_x[::-1]
-        rev_t2_y = t2_y[::-1]
-        reverse_path = Path(rev_t2_x, rev_t2_y, ds=0.8)
+        slice_end = min(len(main_path.x), m_idx + 8)
+        rev_x = main_path.x[:slice_end][::-1]
+        rev_y = main_path.y[:slice_end][::-1]
+        rev_main_path = Path(rev_x, rev_y, ds=0.8)
 
         tokens_list = []
         states_list = []
         classes_list = []
         rev_curr_idx = 0
 
-        limit_rad = math.radians(52.0)
-
-        for i in range(15, N - 15):
+        for i in range(12, N - 12):
             fwd_entry = forward_history[N - 1 - i]
             state: VehicleState = fwd_entry['state']
             x2, y2, th2 = fwd_entry['t2_axle']
-            nominal_phi = fwd_entry['phi']
+            phi = fwd_entry['phi']
 
-            rev_curr_idx, _ = reverse_path.update_progression(x2, y2, rev_curr_idx)
+            rev_curr_idx, _ = rev_main_path.update_progression(x2, y2, rev_curr_idx)
 
-            tokens = reverse_path.get_lookahead_tokens(
+            tokens = rev_main_path.get_lookahead_tokens(
                 x_t2=x2,
                 y_t2=y2,
                 theta_t2=th2,
@@ -186,122 +254,18 @@ class SyntheticDataGenerator:
                 current_idx=rev_curr_idx
             )
 
-            # 1. Nominal on-manifold sample
-            hitch_state_nom = np.array([
+            hitch_state = np.array([
                 math.sin(state.beta1),
                 math.cos(state.beta1),
                 math.sin(state.beta2),
                 math.cos(state.beta2)
             ], dtype=np.float32)
 
-            class_nom = steer_to_soft_target(nominal_phi)
+            steer_target = steer_to_soft_target(phi)
 
             tokens_list.append(tokens)
-            states_list.append(hitch_state_nom)
-            classes_list.append(class_nom)
-
-            # 2. Articulation Perturbations (Stabilized Contraction Funnels)
-            if np.random.rand() < perturb_ratio:
-                # Sub-regime A (40%): Opposite-sign inflection stress (S-curves / chicane reversals)
-                # Sub-regime B (60%): Normal articulation tracking jitter
-                if np.random.rand() < 0.40:
-                    sign1 = float(np.random.choice([-1.0, 1.0]))
-                    sign2 = -sign1 # opposite sign!
-                    scale_b1 = float(np.random.uniform(math.radians(8.0), math.radians(18.0)))
-                    scale_b2 = float(np.random.uniform(math.radians(8.0), math.radians(16.0)))
-                    noise_b1 = sign1 * scale_b1
-                    noise_b2 = sign2 * scale_b2
-                else:
-                    noise_scale = float(np.random.uniform(math.radians(2.0), math.radians(7.0)))
-                    noise_b1 = float(np.random.normal(0.0, noise_scale))
-                    noise_b2 = float(np.random.normal(0.0, noise_scale))
-
-                perturbed_b1 = state.beta1 + noise_b1
-                perturbed_b2 = state.beta2 + noise_b2
-
-                # Enforce physical angle limits safely before critical threshold
-                limit_rad = math.radians(52.0)
-                perturbed_b1 = float(np.clip(perturbed_b1, -limit_rad, limit_rad))
-                perturbed_b2 = float(np.clip(perturbed_b2, -limit_rad, limit_rad))
-
-                # Stabilized LQR corrective steering
-                phi_star = self.lqr.corrective_steering(
-                    nominal_phi=nominal_phi,
-                    nominal_beta1=state.beta1,
-                    nominal_beta2=state.beta2,
-                    actual_beta1=perturbed_b1,
-                    actual_beta2=perturbed_b2,
-                    v0=-1.5
-                )
-
-                hitch_state_pert = np.array([
-                    math.sin(perturbed_b1),
-                    math.cos(perturbed_b1),
-                    math.sin(perturbed_b2),
-                    math.cos(perturbed_b2)
-                ], dtype=np.float32)
-
-                class_pert = steer_to_soft_target(phi_star)
-
-                tokens_list.append(tokens)
-                states_list.append(hitch_state_pert)
-                classes_list.append(class_pert)
-
-            # 3. Lateral Cross-Track & Heading Offset Perturbations (Path Re-centering Funnels)
-            # Gives the transformer tokens with non-zero y_rel and realistic off-track poses!
-            if np.random.rand() < 0.45:
-                dy_local = float(np.random.uniform(-1.2, 1.2))
-                dth_local = float(np.random.uniform(-math.radians(10.0), math.radians(10.0)))
-
-                x2_pert = x2 - dy_local * math.sin(th2)
-                y2_pert = y2 + dy_local * math.cos(th2)
-                th2_pert = th2 + dth_local
-
-                tokens_off = reverse_path.get_lookahead_tokens(
-                    x_t2=x2_pert,
-                    y_t2=y2_pert,
-                    theta_t2=th2_pert,
-                    num_tokens=64,
-                    ds=0.8,
-                    current_idx=rev_curr_idx
-                )
-
-                # Corrective curvature: steer trailer 2 towards centerline
-                y_rel_off = float(tokens_off[0, 1])
-                c_y = 0.22  # rad per meter (crisp restoring stiffness)
-                delta_b2_des = float(np.clip(c_y * y_rel_off, -math.radians(35.0), math.radians(35.0)))
-
-                b2_target = state.beta2 + delta_b2_des
-                b1_target = state.beta1 + (self.dims.L1 / self.dims.L2) * delta_b2_des
-                phi_target = nominal_phi - (self.dims.L0 / self.dims.L2) * delta_b2_des
-
-                # Add small tracking noise to actual state
-                act_b1 = float(state.beta1 + np.random.normal(0.0, math.radians(3.0)))
-                act_b2 = float(state.beta2 + np.random.normal(0.0, math.radians(3.0)))
-                act_b1 = float(np.clip(act_b1, -limit_rad, limit_rad))
-                act_b2 = float(np.clip(act_b2, -limit_rad, limit_rad))
-
-                phi_star_off = self.lqr.corrective_steering(
-                    nominal_phi=phi_target,
-                    nominal_beta1=b1_target,
-                    nominal_beta2=b2_target,
-                    actual_beta1=act_b1,
-                    actual_beta2=act_b2,
-                    v0=-1.5
-                )
-
-                hitch_state_off = np.array([
-                    math.sin(act_b1),
-                    math.cos(act_b1),
-                    math.sin(act_b2),
-                    math.cos(act_b2)
-                ], dtype=np.float32)
-
-                class_off = steer_to_soft_target(phi_star_off)
-
-                tokens_list.append(tokens_off)
-                states_list.append(hitch_state_off)
-                classes_list.append(class_off)
+            states_list.append(hitch_state)
+            classes_list.append(steer_target)
 
         if not classes_list:
             return np.zeros((0, 64, 7), dtype=np.float32), np.zeros((0, 4), dtype=np.float32), np.zeros((0, 15), dtype=np.float32)
@@ -315,14 +279,18 @@ class SyntheticDataGenerator:
     def generate_dataset(
         self,
         num_trajectories: int = 160,
-        perturb_ratio: float = 0.55
+        perturb_ratio: float = 0.60
     ) -> ReversingDataset:
         """
-        Generates full synthetic dataset spanning diverse path types.
+        Generates full synthetic dataset spanning diverse path types and merge geometries.
+        perturb_ratio sets the fraction of merging/re-centering trajectories (vs nominal).
         """
         all_tokens = []
         all_states = []
         all_classes = []
+
+        merge_types = ["peel_off", "lane_change", "angled_merge"]
+        merge_weights = [0.60, 0.25, 0.15]
 
         for _ in range(num_trajectories):
             ptype = str(np.random.choice(PATH_TYPES))
@@ -337,8 +305,21 @@ class SyntheticDataGenerator:
             else:
                 length = float(np.random.uniform(65.0, 100.0))
 
-            hist = self.generate_single_trajectory(path_type=ptype, length_m=length)
-            toks, sts, cls = self.extract_reversing_samples(hist, perturb_ratio=perturb_ratio)
+            is_merge = (np.random.rand() < perturb_ratio)
+            if is_merge:
+                mtype = str(np.random.choice(merge_types, p=merge_weights))
+                max_offset = float(np.random.uniform(0.5, 2.2) * np.random.choice([-1.0, 1.0]))
+            else:
+                mtype = "nominal"
+                max_offset = 0.0
+
+            hist, main_p = self.generate_single_trajectory(
+                path_type=ptype,
+                length_m=length,
+                merge_type=mtype,
+                max_offset=max_offset
+            )
+            toks, sts, cls = self.extract_reversing_samples(hist, main_p)
 
             if len(cls) > 0:
                 all_tokens.append(toks)
