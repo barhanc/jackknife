@@ -167,6 +167,8 @@ class SyntheticDataGenerator:
         classes_list = []
         rev_curr_idx = 0
 
+        limit_rad = math.radians(50.0)
+
         for i in range(15, N - 15):
             fwd_entry = forward_history[N - 1 - i]
             state: VehicleState = fwd_entry['state']
@@ -184,7 +186,7 @@ class SyntheticDataGenerator:
                 current_idx=rev_curr_idx
             )
 
-            # 1. Nominal sample
+            # 1. Nominal on-manifold sample
             hitch_state_nom = np.array([
                 math.sin(state.beta1),
                 math.cos(state.beta1),
@@ -198,15 +200,17 @@ class SyntheticDataGenerator:
             states_list.append(hitch_state_nom)
             classes_list.append(class_nom)
 
-            # 2. Tuned LQR Perturbation Recovery Funnels
+            # 2. Articulation Perturbations (Stabilized Contraction Funnels)
             if np.random.rand() < perturb_ratio:
-                # Regimes: 65% small/medium tracking noise (2°-8°), 35% controlled articulation stress (8°-18°)
-                if np.random.rand() < 0.35:
-                    sign = float(np.random.choice([-1.0, 1.0]))
+                # Sub-regime A (40%): Opposite-sign inflection stress (S-curves / chicane reversals)
+                # Sub-regime B (60%): Normal articulation tracking jitter
+                if np.random.rand() < 0.40:
+                    sign1 = float(np.random.choice([-1.0, 1.0]))
+                    sign2 = -sign1 # opposite sign!
                     scale_b1 = float(np.random.uniform(math.radians(8.0), math.radians(18.0)))
-                    scale_b2 = float(np.random.uniform(math.radians(5.0), math.radians(14.0)))
-                    noise_b1 = sign * scale_b1
-                    noise_b2 = sign * scale_b2 * float(np.random.uniform(0.5, 0.85))
+                    scale_b2 = float(np.random.uniform(math.radians(8.0), math.radians(16.0)))
+                    noise_b1 = sign1 * scale_b1
+                    noise_b2 = sign2 * scale_b2
                 else:
                     noise_scale = float(np.random.uniform(math.radians(2.0), math.radians(7.0)))
                     noise_b1 = float(np.random.normal(0.0, noise_scale))
@@ -242,6 +246,62 @@ class SyntheticDataGenerator:
                 tokens_list.append(tokens)
                 states_list.append(hitch_state_pert)
                 classes_list.append(class_pert)
+
+            # 3. Lateral Cross-Track & Heading Offset Perturbations (Path Re-centering Funnels)
+            # Gives the transformer tokens with non-zero y_rel and realistic off-track poses!
+            if np.random.rand() < 0.45:
+                dy_local = float(np.random.uniform(-1.2, 1.2))
+                dth_local = float(np.random.uniform(-math.radians(10.0), math.radians(10.0)))
+
+                x2_pert = x2 - dy_local * math.sin(th2)
+                y2_pert = y2 + dy_local * math.cos(th2)
+                th2_pert = th2 + dth_local
+
+                tokens_off = reverse_path.get_lookahead_tokens(
+                    x_t2=x2_pert,
+                    y_t2=y2_pert,
+                    theta_t2=th2_pert,
+                    num_tokens=64,
+                    ds=0.8,
+                    current_idx=rev_curr_idx
+                )
+
+                # Corrective curvature: steer trailer 2 towards centerline
+                y_rel_off = float(tokens_off[0, 1])
+                c_y = 0.14  # rad per meter
+                delta_b2_des = float(np.clip(c_y * y_rel_off, -math.radians(22.0), math.radians(22.0)))
+
+                b2_target = state.beta2 + delta_b2_des
+                b1_target = state.beta1 + (self.dims.L1 / self.dims.L2) * delta_b2_des
+                phi_target = nominal_phi - (self.dims.L0 / self.dims.L2) * delta_b2_des
+
+                # Add small tracking noise to actual state
+                act_b1 = float(state.beta1 + np.random.normal(0.0, math.radians(3.0)))
+                act_b2 = float(state.beta2 + np.random.normal(0.0, math.radians(3.0)))
+                act_b1 = float(np.clip(act_b1, -limit_rad, limit_rad))
+                act_b2 = float(np.clip(act_b2, -limit_rad, limit_rad))
+
+                phi_star_off = self.lqr.corrective_steering(
+                    nominal_phi=phi_target,
+                    nominal_beta1=b1_target,
+                    nominal_beta2=b2_target,
+                    actual_beta1=act_b1,
+                    actual_beta2=act_b2,
+                    v0=-1.5
+                )
+
+                hitch_state_off = np.array([
+                    math.sin(act_b1),
+                    math.cos(act_b1),
+                    math.sin(act_b2),
+                    math.cos(act_b2)
+                ], dtype=np.float32)
+
+                class_off = steer_to_soft_target(phi_star_off)
+
+                tokens_list.append(tokens_off)
+                states_list.append(hitch_state_off)
+                classes_list.append(class_off)
 
         if not classes_list:
             return np.zeros((0, 64, 7), dtype=np.float32), np.zeros((0, 4), dtype=np.float32), np.zeros((0, 15), dtype=np.float32)
