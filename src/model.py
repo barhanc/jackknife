@@ -20,6 +20,19 @@ def class_idx_to_steer(idx: int) -> float:
     """Converts class index to steering angle in radians."""
     return STEER_CLASSES_RAD[idx]
 
+def steer_to_soft_target(phi_rad: float, sigma_deg: float = 4.0) -> np.ndarray:
+    """
+    Converts a continuous steering angle into a smooth Gaussian target distribution
+    over the 15 discrete steering classes.
+    Preserves exact sub-degree steering precision without threshold quantization chatter.
+    """
+    phi_deg = math.degrees(phi_rad)
+    classes = np.array(STEER_CLASSES, dtype=np.float32)
+    sq_diffs = (classes - phi_deg) ** 2
+    probs = np.exp(-0.5 * sq_diffs / (sigma_deg ** 2))
+    probs /= np.sum(probs)
+    return probs.astype(np.float32)
+
 
 class BernoulliPFN(nn.Module):
     """
@@ -254,10 +267,12 @@ class MultiTrailerPFN(nn.Module):
     def predict_proba(
         self,
         tokens: torch.Tensor,
-        hitch_state: torch.Tensor
+        hitch_state: torch.Tensor,
+        temperature: float = 1.5
     ) -> torch.Tensor:
         """
-        Returns softmax probability distribution over steering action classes.
+        Returns temperature-scaled softmax probability distribution over steering action classes.
+        Temperature scaling preserves continuous physical damping and eliminates steering chatter.
         """
         self.eval()
         if tokens.ndim == 2:
@@ -268,20 +283,22 @@ class MultiTrailerPFN(nn.Module):
         out = self(tokens, hitch_state)
         if isinstance(out, tuple):
             out = out[0]
-        return F.softmax(out, dim=-1)
+        temp = max(float(temperature), 1e-4)
+        return F.softmax(out / temp, dim=-1)
 
     def predict_action(
         self,
         tokens_np: np.ndarray,
         hitch_state_np: np.ndarray,
         device: torch.device,
-        use_expectation: bool = True
+        use_expectation: bool = True,
+        temperature: float = 1.5
     ) -> Tuple[float, np.ndarray, np.ndarray]:
         """
         Single-sample runtime inference helper for game simulation execution.
         Returns:
             steer_rad: Continuous steering angle (via expectation or argmax)
-            attn_weights: (num_tokens,) uniform array
+            attn_weights: (num_tokens,) array
             probs: (num_classes,) probability distribution
         """
         self.eval()
@@ -290,7 +307,8 @@ class MultiTrailerPFN(nn.Module):
             t_state = torch.from_numpy(hitch_state_np).float().unsqueeze(0).to(device)
 
             logits, attn = self(t_tok, t_state, return_attention=True)
-            probs = F.softmax(logits, dim=-1).cpu().numpy()[0]
+            temp = max(float(temperature), 1e-4)
+            probs = F.softmax(logits / temp, dim=-1).cpu().numpy()[0]
 
             if use_expectation:
                 # Softmax expected value: eliminates quantization chatter

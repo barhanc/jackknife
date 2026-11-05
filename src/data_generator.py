@@ -7,23 +7,27 @@ from typing import List, Tuple, Dict, Any, Optional
 from src.kinematics import TractorDoubleTrailerKinematics, VehicleDimensions, VehicleState
 from src.path_generator import Path, generate_synthetic_path
 from src.lqr_controller import ReverseLQRController
-from src.model import steer_to_class_idx, NUM_STEER_CLASSES
+from src.model import steer_to_class_idx, steer_to_soft_target, NUM_STEER_CLASSES
 
 class ReversingDataset(Dataset):
     """
     In-memory PyTorch Dataset for Multi-Trailer Reversing RL-PFN.
-    Contains (lookahead_tokens: 64x7, hitch_state: 4, steer_class: int).
+    Contains:
+      - lookahead_tokens: (N, 64, 7) float32
+      - hitch_states: (N, 4) float32
+      - steer_targets: (N, 15) float32 Gaussian soft target distributions
     """
     def __init__(self, tokens: np.ndarray, hitch_states: np.ndarray, steer_classes: np.ndarray):
         self.tokens = torch.from_numpy(tokens).float()
         self.hitch_states = torch.from_numpy(hitch_states).float()
-        self.steer_classes = torch.from_numpy(steer_classes).long()
+        # steer_classes can be either 2D continuous distribution targets (N, 15) or 1D class indices (N,)
+        self.steer_targets = torch.from_numpy(steer_classes).float() if steer_classes.ndim == 2 else torch.from_numpy(steer_classes).long()
 
     def __len__(self):
-        return len(self.steer_classes)
+        return len(self.steer_targets)
 
     def __getitem__(self, idx):
-        return self.tokens[idx], self.hitch_states[idx], self.steer_classes[idx]
+        return self.tokens[idx], self.hitch_states[idx], self.steer_targets[idx]
 
 
 class SyntheticDataGenerator:
@@ -173,7 +177,7 @@ class SyntheticDataGenerator:
                 math.cos(state.beta2)
             ], dtype=np.float32)
 
-            class_nom = steer_to_class_idx(nominal_phi)
+            class_nom = steer_to_soft_target(nominal_phi)
 
             tokens_list.append(tokens)
             states_list.append(hitch_state_nom)
@@ -220,7 +224,7 @@ class SyntheticDataGenerator:
                     math.cos(perturbed_b2)
                 ], dtype=np.float32)
 
-                class_pert = steer_to_class_idx(phi_star)
+                class_pert = steer_to_soft_target(phi_star)
 
                 tokens_list.append(tokens)
                 states_list.append(hitch_state_pert)
@@ -229,7 +233,7 @@ class SyntheticDataGenerator:
         return (
             np.array(tokens_list, dtype=np.float32),
             np.array(states_list, dtype=np.float32),
-            np.array(classes_list, dtype=np.int64)
+            np.array(classes_list, dtype=np.float32)
         )
 
     def generate_dataset(

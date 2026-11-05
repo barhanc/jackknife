@@ -6,10 +6,11 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 
 from src.data_generator import SyntheticDataGenerator, ReversingDataset
-from src.model import MultiTrailerPFN, NUM_STEER_CLASSES
+from src.model import MultiTrailerPFN, NUM_STEER_CLASSES, STEER_CLASSES_RAD
 
 def train_model(
     num_trajectories: int = 60,
@@ -54,7 +55,8 @@ def train_model(
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"MultiTrailerPFN architecture initialized ({total_params:,} parameters).")
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+    classes_rad = torch.tensor(STEER_CLASSES_RAD, device=device, dtype=torch.float32)
+    criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
@@ -94,6 +96,7 @@ def train_model(
         train_loss = 0.0
         train_correct = 0
         train_adj_correct = 0
+        train_deg_err = 0.0
         total_train = 0
 
         for tokens, hitch_state, targets in train_loader:
@@ -102,15 +105,22 @@ def train_model(
             optimizer.zero_grad()
             res = model(tokens, hitch_state)
             logits = res[0] if isinstance(res, tuple) else res
+
+            # Standard Cross-Entropy directly against the continuous categorical target distribution
             loss = criterion(logits, targets)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             train_loss += loss.item() * len(targets)
+            pred_probs = F.softmax(logits, dim=-1)
+            pred_exp = torch.sum(pred_probs * classes_rad, dim=-1)
+            true_exp = torch.sum(targets * classes_rad, dim=-1)
             preds = torch.argmax(logits, dim=-1)
-            train_correct += (preds == targets).sum().item()
-            train_adj_correct += (torch.abs(preds - targets) <= 1).sum().item()
+            target_labels = torch.argmax(targets, dim=-1)
+            train_correct += (preds == target_labels).sum().item()
+            train_adj_correct += (torch.abs(preds - target_labels) <= 1).sum().item()
+            train_deg_err += torch.abs(torch.rad2deg(pred_exp) - torch.rad2deg(true_exp)).sum().item()
             total_train += len(targets)
 
         scheduler.step()
@@ -120,6 +130,7 @@ def train_model(
         val_loss = 0.0
         val_correct = 0
         val_adj_correct = 0
+        val_deg_err = 0.0
         total_val = 0
 
         with torch.no_grad():
@@ -128,26 +139,35 @@ def train_model(
 
                 res = model(tokens, hitch_state)
                 logits = res[0] if isinstance(res, tuple) else res
+
+                # Standard Cross-Entropy against continuous target distribution
                 loss = criterion(logits, targets)
 
                 val_loss += loss.item() * len(targets)
+                pred_probs = F.softmax(logits, dim=-1)
+                pred_exp = torch.sum(pred_probs * classes_rad, dim=-1)
+                true_exp = torch.sum(targets * classes_rad, dim=-1)
                 preds = torch.argmax(logits, dim=-1)
-                val_correct += (preds == targets).sum().item()
-                val_adj_correct += (torch.abs(preds - targets) <= 1).sum().item()
+                target_labels = torch.argmax(targets, dim=-1)
+                val_correct += (preds == target_labels).sum().item()
+                val_adj_correct += (torch.abs(preds - target_labels) <= 1).sum().item()
+                val_deg_err += torch.abs(torch.rad2deg(pred_exp) - torch.rad2deg(true_exp)).sum().item()
                 total_val += len(targets)
 
         train_acc = train_correct / total_train * 100.0
         train_adj = train_adj_correct / total_train * 100.0
+        avg_train_deg_err = train_deg_err / total_train
         val_acc = val_correct / total_val * 100.0
         val_adj = val_adj_correct / total_val * 100.0
+        avg_val_deg_err = val_deg_err / total_val
         avg_train_loss = train_loss / total_train
         avg_val_loss = val_loss / total_val
 
         stream_info = f" [Stream +{gen_time:.1f}s]" if stream else ""
         print(
             f"Epoch {epoch:2d}/{epochs:2d}{stream_info} | "
-            f"Train Loss: {avg_train_loss:.4f} (Acc: {train_acc:.1f}%, Adj: {train_adj:.1f}%) | "
-            f"Val Loss: {avg_val_loss:.4f} (Acc: {val_acc:.1f}%, Adj: {val_adj:.1f}%)"
+            f"Train Loss: {avg_train_loss:.4f} (Err: {avg_train_deg_err:.2f}°, Acc: {train_acc:.1f}%, Adj: {train_adj:.1f}%) | "
+            f"Val Loss: {avg_val_loss:.4f} (Err: {avg_val_deg_err:.2f}°, Acc: {val_acc:.1f}%, Adj: {val_adj:.1f}%)"
         )
 
         # Record metrics history for loss analysis & grokking detection
@@ -155,6 +175,8 @@ def train_model(
             "epoch": epoch,
             "train_loss": float(avg_train_loss),
             "val_loss": float(avg_val_loss),
+            "train_deg_err": float(avg_train_deg_err),
+            "val_deg_err": float(avg_val_deg_err),
             "train_acc": float(train_acc),
             "train_adj_acc": float(train_adj),
             "val_acc": float(val_acc),
