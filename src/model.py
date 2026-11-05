@@ -162,7 +162,6 @@ class MultiTrailerPFN(nn.Module):
         # Feature projections for memory (path tokens) and query (hitch state)
         self.map_src = nn.Linear(token_dim, dim_model)
         self.map_tgt = nn.Linear(state_dim, dim_model)
-        self.pos_embed = nn.Parameter(torch.randn(1, num_tokens, dim_model) * 0.02)
 
         # PyTorch Built-in Transformer
         self.transformer = nn.Transformer(
@@ -213,10 +212,8 @@ class MultiTrailerPFN(nn.Module):
         tgt_mask = -torch.eye(query_size, device=X_query.device) + 1.0
         tgt_mask[tgt_mask == 1.0] = float('-inf')
 
-        # Encode trajectory context
+        # Encode trajectory context (relying purely on continuous spatial coordinates)
         src = self.map_src(tokens)
-        if self.pos_embed is not None and tokens.size(1) <= self.pos_embed.size(1):
-            src = src + self.pos_embed[:, :tokens.size(1), :]
 
         # Query vehicle articulation state
         tgt = self.map_tgt(X_query)
