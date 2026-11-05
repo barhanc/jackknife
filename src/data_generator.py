@@ -67,7 +67,9 @@ class SyntheticDataGenerator:
     def __init__(self, dims: Optional[VehicleDimensions] = None):
         self.dims = dims or VehicleDimensions()
         self.kinematics = TractorDoubleTrailerKinematics(self.dims)
-        self.lqr = ReverseLQRController(self.dims)
+        # Consistent, non-conflicting optimal Riccati teacher
+        self.lqr = ReverseLQRController(self.dims, q_diag=(3.5, 7.0), r_val=18.0, max_delta_phi_deg=22.0)
+        self.c_y = 0.16  # Calibrated restoring stiffness (clean recovery without phase lag resonance)
 
     def generate_single_trajectory(
         self,
@@ -158,7 +160,7 @@ class SyntheticDataGenerator:
             return np.zeros((0, 64, 7), dtype=np.float32), np.zeros((0, 4), dtype=np.float32), np.zeros((0, 15), dtype=np.float32)
 
         lqr = lqr_controller or self.lqr
-        restoring_cy = c_y if c_y is not None else 0.18
+        restoring_cy = c_y if c_y is not None else self.c_y
 
         t2_x = np.array([h['t2_axle'][0] for h in forward_history])
         t2_y = np.array([h['t2_axle'][1] for h in forward_history])
@@ -341,26 +343,12 @@ class SyntheticDataGenerator:
             else:
                 length = float(np.random.uniform(65.0, 100.0))
 
-            # Domain Randomization: Sample OG teacher persona for this trajectory
-            q1 = float(np.random.uniform(2.0, 5.0))
-            q2 = float(np.random.uniform(4.0, 9.0))
-            r_val = float(np.random.uniform(15.0, 30.0))
-            max_delta_deg = float(np.random.uniform(16.0, 26.0))
-            cy_sample = float(np.random.uniform(0.12, 0.20))
-
-            traj_lqr = ReverseLQRController(
-                dims=self.dims,
-                q_diag=(q1, q2),
-                r_val=r_val,
-                max_delta_phi_deg=max_delta_deg
-            )
-
             hist = self.generate_single_trajectory(path_type=ptype, length_m=length)
             toks, sts, cls = self.extract_reversing_samples(
                 hist,
                 perturb_ratio=perturb_ratio,
-                lqr_controller=traj_lqr,
-                c_y=cy_sample
+                lqr_controller=self.lqr,
+                c_y=self.c_y
             )
 
             if len(cls) > 0:
