@@ -222,14 +222,35 @@ class MultiTrailerPFN(nn.Module):
         tgt = self.map_tgt(X_query)
 
         # PyTorch Built-in Transformer execution
-        out = self.transformer(src, tgt, tgt_mask=tgt_mask.to(tgt.dtype))
+        if not return_attention:
+            out = self.transformer(src, tgt, tgt_mask=tgt_mask.to(tgt.dtype))
+            attn_weights = None
+        else:
+            # Step through decoder to extract exact cross-attention weights
+            memory = self.transformer.encoder(src)
+            x = tgt
+            for layer in self.transformer.decoder.layers[:-1]:
+                x = layer(x, memory, tgt_mask=tgt_mask.to(tgt.dtype))
+
+            last_layer = self.transformer.decoder.layers[-1]
+            x_sa = last_layer.norm1(x + last_layer._sa_block(x, tgt_mask.to(tgt.dtype), None))
+            attn_out, attn_weights = last_layer.multihead_attn(
+                x_sa, memory, memory,
+                need_weights=True,
+                average_attn_weights=True
+            )
+            x = last_layer.norm2(x_sa + last_layer.dropout2(attn_out))
+            out = last_layer.norm3(x + last_layer._ff_block(x))
+
         out = self.map_out(out)
 
         if is_2d_query:
             out = out.squeeze(1)
+            if attn_weights is not None:
+                attn_weights = attn_weights.squeeze(1)
 
         if return_attention:
-            return out, None
+            return out, attn_weights
         return out
 
     @torch.no_grad()
@@ -271,7 +292,8 @@ class MultiTrailerPFN(nn.Module):
             t_tok = torch.from_numpy(tokens_np).float().unsqueeze(0).to(device)
             t_state = torch.from_numpy(hitch_state_np).float().unsqueeze(0).to(device)
 
-            probs = self.predict_proba(t_tok, t_state).cpu().numpy()[0]
+            logits, attn = self(t_tok, t_state, return_attention=True)
+            probs = F.softmax(logits, dim=-1).cpu().numpy()[0]
 
             if use_expectation:
                 # Softmax expected value: eliminates quantization chatter
@@ -280,5 +302,8 @@ class MultiTrailerPFN(nn.Module):
                 best_idx = int(np.argmax(probs))
                 steer_rad = class_idx_to_steer(best_idx)
 
-            attn_weights = np.ones(tokens_np.shape[0], dtype=np.float32) / float(tokens_np.shape[0])
+            if attn is not None:
+                attn_weights = attn.cpu().numpy()[0]
+            else:
+                attn_weights = np.ones(tokens_np.shape[0], dtype=np.float32) / float(tokens_np.shape[0])
             return steer_rad, attn_weights, probs
