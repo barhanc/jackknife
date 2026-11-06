@@ -471,31 +471,33 @@ class JackknifeGame25D:
 
         # Keyboard Driving in Manual Mode
         if self.mode == "MANUAL" and not self.ai_save_active:
-            # Responsive truck power steering: 40.0 deg/sec rate for snappy, precise feel
-            steer_rate = math.radians(40.0)
+            # Smooth, realistic truck power steering (delicate micro-taps, progressive turns)
+            steer_rate = math.radians(22.0)
             if keys[pygame.K_a] or keys[pygame.K_LEFT]:
                 self.steer_hold_time = getattr(self, "steer_hold_time", 0.0) + self.dt
-                ramp = min(2.2, 1.2 + self.steer_hold_time * 1.8)
+                ramp = min(1.35, 0.55 + self.steer_hold_time * 0.55)
                 self.target_steer = min(self.dims.max_steer_rad, self.target_steer + steer_rate * ramp * self.dt)
             elif keys[pygame.K_d] or keys[pygame.K_RIGHT]:
                 self.steer_hold_time = getattr(self, "steer_hold_time", 0.0) + self.dt
-                ramp = min(2.2, 1.2 + self.steer_hold_time * 1.8)
+                ramp = min(1.35, 0.55 + self.steer_hold_time * 0.55)
                 self.target_steer = max(-self.dims.max_steer_rad, self.target_steer - steer_rate * ramp * self.dt)
             else:
                 self.steer_hold_time = 0.0
-                self.target_steer *= 0.93
+                self.target_steer *= 0.90
 
-            # Intuitive gas/reverse pedals (no spacebar required)
-            if keys[pygame.K_s] or keys[pygame.K_DOWN]:
-                self.current_speed = 0.0 if (self.has_arrived or self.is_off_track) else -1.5
-            elif keys[pygame.K_w] or keys[pygame.K_UP]:
-                if self.is_off_track:
-                    self.current_speed = 0.0
-                else:
-                    self.has_arrived = False
-                    self.current_speed = 1.5
+            # Intuitive gas/reverse pedals (can drive forward even after docking!)
+            if keys[pygame.K_w] or keys[pygame.K_UP]:
+                self.has_arrived = False
+                self.is_off_track = False
+                self.current_speed = 2.0
+            elif keys[pygame.K_s] or keys[pygame.K_DOWN]:
+                self.has_arrived = False
+                self.is_off_track = False
+                self.current_speed = -1.5
             else:
-                self.current_speed = 0.0
+                self.current_speed *= 0.85
+                if abs(self.current_speed) < 0.05:
+                    self.current_speed = 0.0
         elif self.mode == "AUTONOMOUS" or self.ai_save_active:
             self.current_speed = 0.0 if (self.has_arrived or self.is_off_track or self.is_paused) else -1.5
 
@@ -551,6 +553,9 @@ class JackknifeGame25D:
                 if event.key == pygame.K_m:
                     self.mode = "AUTONOMOUS" if self.mode == "MANUAL" else "MANUAL"
                     self.ai_save_active = False
+                    if self.mode == "MANUAL":
+                        self.has_arrived = False
+                        self.is_off_track = False
                 elif event.key == pygame.K_r:
                     self.reset_vehicle_to_path()
                 elif event.key == pygame.K_SPACE:
@@ -611,28 +616,29 @@ class JackknifeGame25D:
             fy = self.state.y0 + self.dims.L0 * math.sin(self.state.theta0)
             cab_lat_err = abs(-(fx - self.path.x[0]) * math.sin(th0) + (fy - self.path.y[0]) * math.cos(th0))
 
-            if self.cross_track_err > 5.5 or (self.current_path_idx <= 5 and cab_lat_err > 5.5):
+            if (self.mode == "AUTONOMOUS" or self.ai_save_active) and (self.cross_track_err > 5.5 or (self.current_path_idx <= 5 and cab_lat_err > 5.5)):
                 self.is_off_track = True
                 self.current_speed = 0.0
                 return
 
-            # Trigger arrival if Trailer 2 has reached or crossed the finish line
-            if self.current_path_idx >= len(self.path.x) - 6:
-                end_x, end_y = self.path.x[-1], self.path.y[-1]
-                end_th = self.path.headings[-1]
-                t_x, t_y = math.cos(end_th), math.sin(end_th)
-                n_x, n_y = -math.sin(end_th), math.cos(end_th)
+            # Trigger arrival if Trailer 2 has reached or crossed the finish line while reversing
+            if (self.mode == "AUTONOMOUS" or self.ai_save_active) and self.current_speed < 0:
+                if self.current_path_idx >= len(self.path.x) - 6:
+                    end_x, end_y = self.path.x[-1], self.path.y[-1]
+                    end_th = self.path.headings[-1]
+                    t_x, t_y = math.cos(end_th), math.sin(end_th)
+                    n_x, n_y = -math.sin(end_th), math.cos(end_th)
 
-                dx = x2 - end_x
-                dy = y2 - end_y
-                s_past = dx * t_x + dy * t_y
-                lat_err = abs(dx * n_x + dy * n_y)
+                    dx = x2 - end_x
+                    dy = y2 - end_y
+                    s_past = dx * t_x + dy * t_y
+                    lat_err = abs(dx * n_x + dy * n_y)
 
-                # Arrived if within 2.2m approaching the line OR crossed past the line (up to 6.0m past),
-                # provided lateral position is within full track width (4.8m)
-                if -2.2 <= s_past <= 6.0 and lat_err <= 4.8:
-                    self.has_arrived = True
-                    self.current_speed = 0.0
+                    # Arrived if within 2.2m approaching the line OR crossed past the line (up to 6.0m past),
+                    # provided lateral position is within full track width (4.8m)
+                    if -2.2 <= s_past <= 6.0 and lat_err <= 4.8:
+                        self.has_arrived = True
+                        self.current_speed = 0.0
 
         if not self.has_arrived and not self.is_off_track and not self.is_paused and (self.mode == "AUTONOMOUS" or self.ai_save_active):
             self.current_speed = -1.5
@@ -1675,12 +1681,12 @@ class JackknifeGame25D:
             msg = self.font_mono_bold.render("DRAWING PATH... (Physical R >= 10.0m)", True, COLOR_ACCENT_CYAN)
             self.screen.blit(msg, (self.width // 2 - msg.get_width() // 2, int(45 * s)))
         elif self.has_arrived:
-            banner_w, banner_h = int(450 * s), int(100 * s)
+            banner_w, banner_h = int(490 * s), int(100 * s)
             banner_surf = pygame.Surface((banner_w, banner_h), pygame.SRCALPHA)
             pygame.draw.rect(banner_surf, (12, 34, 22, 245), (0, 0, banner_w, banner_h), border_radius=int(14 * s))
             pygame.draw.rect(banner_surf, (45, 225, 125), (0, 0, banner_w, banner_h), 2, border_radius=int(14 * s))
             msg = self.font_big_alert.render("DOCK SECURED", True, (45, 225, 125))
-            sub = self.font_big_sub.render("PRESS [R] TO RESTART", True, (215, 245, 225))
+            sub = self.font_big_sub.render("PRESS [M] TO DRIVE FORWARD · [R] RESTART", True, (215, 245, 225))
             banner_surf.blit(msg, (banner_w // 2 - msg.get_width() // 2, int(16 * s)))
             banner_surf.blit(sub, (banner_w // 2 - sub.get_width() // 2, int(58 * s)))
             self.screen.blit(banner_surf, (self.width // 2 - banner_w // 2, self.height // 2 - banner_h // 2))
