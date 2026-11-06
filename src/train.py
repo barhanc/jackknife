@@ -176,8 +176,8 @@ def train_model(
         except Exception as e:
             print(f"Warning: Failed to save metrics file: {e}")
 
-        # Always save the newest model every epoch (streaming PFN continuously trains on fresh prior samples)
-        torch.save({
+        # Always save the newest model and preserve per-epoch intermediate checkpoints
+        checkpoint_dict = {
             'model_state_dict': model.state_dict(),
             'train_loss': avg_train_loss,
             'val_loss': avg_val_loss,
@@ -188,8 +188,11 @@ def train_model(
             'epoch': epoch,
             'total_params': total_params,
             'metrics_history': metrics_history
-        }, save_path)
-        print(f" -> Checkpoint saved to {save_path} (Latest: Epoch {epoch}, Val Adj Acc: {val_adj:.1f}%)")
+        }
+        torch.save(checkpoint_dict, save_path)
+        epoch_save_path = os.path.join(os.path.dirname(save_path), f"pfn_epoch_{epoch}.pt")
+        torch.save(checkpoint_dict, epoch_save_path)
+        print(f" -> Checkpoint saved to {save_path} and {epoch_save_path} (Latest: Epoch {epoch}, Val Adj Acc: {val_adj:.1f}%)")
 
     print(f"\nTraining completed! Latest checkpoint saved to: {save_path}")
     return model
