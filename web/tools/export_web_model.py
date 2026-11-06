@@ -9,7 +9,7 @@ import sys
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from src.model import ControlTransformer
 from src.kinematics import TractorDoubleTrailerKinematics, VehicleState
@@ -130,9 +130,10 @@ def main():
                             'headings': drawn.headings.tolist(), 'curvatures': drawn.curvatures.tolist()}}
     (args.output / 'parity.json').write_text(json.dumps(fixtures))
     export_path_references(args.output)
-    from src.export_web_assets import export_web_assets, export_visual_references
+    from export_web_assets import export_web_assets, export_visual_references, export_truck_references
     export_web_assets(args.output.parent / 'assets')
     export_visual_references(args.output.parent / 'assets')
+    export_truck_references(args.output.parent / 'assets')
     print(f'Exported {len(binary)/1024/1024:.2f} MiB and {len(cases)} parity cases to {args.output}')
 
 

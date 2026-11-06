@@ -15,7 +15,7 @@ from src.game.weather import Snowfall
 def export_web_assets(output: Path):
     pygame.init()
     output.mkdir(parents=True, exist_ok=True)
-    font_dir = Path(__file__).parent / 'game/assets/fonts'
+    font_dir = Path(__file__).resolve().parents[2] / 'src/game/assets/fonts'
     families = {'arcade': 'PressStart2P-Regular.ttf', 'mono': 'DejaVuSansMono.ttf',
                 'mono_bold': 'DejaVuSansMono-Bold.ttf', 'sans_bold': 'DejaVuSans-Bold.ttf'}
     chars = ''.join(chr(i) for i in range(32, 127)) + '°·×↻−→▾∷'
@@ -99,4 +99,45 @@ def export_visual_references(output: Path):
                        'state': vars(game.state), 'index': game.current_path_idx,
                        'probabilities': game.action_probs.tolist(), 'attention': game.attention_weights.tolist()})
     (output / 'visual-scenes.json').write_text(json.dumps(scenes))
+    pygame.quit()
+
+
+def export_truck_references(output: Path):
+    """Render isolated trucks so background similarity cannot hide vehicle differences."""
+    from unittest.mock import patch
+    from src.game.vehicle import VehicleRenderer
+    from src.kinematics import VehicleState, VehicleDimensions, TractorDoubleTrailerKinematics
+    pygame.init()
+    poses = [(0, 0, 0), (.7, .2, -.1), (-1.1, -.55, .35), (2.2, .9, -.7),
+             (3.141592653589793, 0, 0), (-2.4, -1.05, .9)]
+    fixtures = []
+    class Camera:
+        def __init__(self, scale):
+            self.scale = scale
+        def project(self, x, y):
+            return int(200+x*self.scale), int(180-y*self.scale)
+    for scale in (6.575, 12):
+        for i, (heading, beta1, beta2) in enumerate(poses):
+            state = VehicleState(0, 0, heading, beta1, beta2, .12)
+            surface = pygame.Surface((400, 360), pygame.SRCALPHA)
+            camera = Camera(scale)
+            commands = []
+            original_polygon, original_lines = pygame.draw.polygon, pygame.draw.lines
+            def polygon(target, color, points, width=0):
+                if width:
+                    for a, b in zip(points, points[1:]+points[:1]):
+                        commands.append({'kind':'line','points':[a,b],'color':color,'width':width})
+                else:
+                    commands.append({'kind':'polygon','points':points,'color':color})
+                return original_polygon(target, color, points, width)
+            def lines(target, color, closed, points, width=1):
+                for a, b in zip(points, points[1:]):
+                    commands.append({'kind':'line','points':[a,b],'color':color,'width':width})
+                return original_lines(target, color, closed, points, width)
+            with patch('pygame.draw.polygon', polygon), patch('pygame.draw.lines', lines):
+                VehicleRenderer().draw(surface, camera, state, VehicleDimensions(), TractorDoubleTrailerKinematics())
+            name = f'truck-{scale}-{i}'
+            pygame.image.save(surface, str(output / f'{name}.png'))
+            fixtures.append({'name':name,'width':400,'height':360,'scale':scale,'state':vars(state),'commands':commands})
+    (output / 'truck-scenes.json').write_text(json.dumps(fixtures))
     pygame.quit()

@@ -1,5 +1,5 @@
 {
-  "include": ["main.py", "src", "tests"],
+  "include": ["main.py", "src", "tests", "web/tools"],
   "exclude": ["**/__pycache__", "build", "dist"],
   "venvPath": ".",
   "venv": ".venv",

@@ -53,7 +53,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Export browser weights and Python reference cases
         if: matrix.os == 'ubuntu-latest'
-        run: uv run --no-sync python src/export_web_model.py
+        run: uv run --no-sync python web/tools/export_web_model.py
       - name: Test and build browser game
         if: matrix.os == 'ubuntu-latest'
         working-directory: web

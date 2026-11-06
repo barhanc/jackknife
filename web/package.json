@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "test:browser": "playwright test",
-    "export-model": "cd .. && uv run python src/export_web_model.py",
+    "export-model": "cd .. && uv run python web/tools/export_web_model.py",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "pack:runntime": "node scripts/pack-runntime.mjs"
