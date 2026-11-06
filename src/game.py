@@ -12,7 +12,7 @@ os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
 
 from src.kinematics import TractorDoubleTrailerKinematics, VehicleDimensions, VehicleState
 from src.path_generator import Path, smooth_and_constrain_user_path, generate_synthetic_path
-from src.model import MultiTrailerPFN
+from src.model import ControlTransformer
 
 # ==============================================================================
 # CLEAN 2.5D NIGHT DIORAMA PALETTE (Tactile Top-Down View)
@@ -127,12 +127,12 @@ class TopDownCamera:
 
 
 class JackknifeGame25D:
-    def __init__(self, model_path: Optional[str] = "models/pfn_best.pt"):
+    def __init__(self, model_path: Optional[str] = "models/model.pt"):
         pygame.init()
         pygame.font.init()
         self.width, self.height = 1400, 900
         self.screen = pygame.display.set_mode((self.width, self.height), pygame.RESIZABLE | pygame.DOUBLEBUF)
-        pygame.display.set_caption("Multi-Trailer Reversing RL-PFN | Autonomous Reversing Simulation")
+        pygame.display.set_caption("Multi-Trailer Reversing Simulation | Autonomous ControlTransformer")
         self.clock = pygame.time.Clock()
 
         # Dynamic Resolution-Responsive Typography (Scales crisp and readable from 1080p to 4K)
@@ -145,7 +145,7 @@ class JackknifeGame25D:
 
         # PyTorch Model
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model: Optional[MultiTrailerPFN] = None
+        self.model: Optional[ControlTransformer] = None
         self.model_path = model_path
         self.model_mtime = 0.0
         self.load_model(model_path)
@@ -220,11 +220,11 @@ class JackknifeGame25D:
             try:
                 mtime = os.path.getmtime(path)
                 ckpt = torch.load(path, map_location=self.device)
-                self.model = MultiTrailerPFN().to(self.device)
+                self.model = ControlTransformer().to(self.device)
                 self.model.load_state_dict(ckpt['model_state_dict'])
                 self.model.eval()
                 self.model_mtime = mtime
-                print(f"Loaded RL-PFN checkpoint from {path} (Val Adj Acc: {ckpt.get('val_adj_acc', 0):.1f}%)")
+                print(f"Loaded ControlTransformer checkpoint from {path} (Val Adj Acc: {ckpt.get('val_adj_acc', 0):.1f}%)")
             except Exception as e:
                 print(f"Failed to load checkpoint: {e}")
                 self.model = None
@@ -1755,7 +1755,7 @@ class JackknifeGame25D:
         pygame.display.flip()
 
     def run(self):
-        print("Launching Clean 2.5D Top-Down RL-PFN Simulation Game...")
+        print("Launching Clean 2.5D Top-Down Simulation Game...")
         while self.is_running:
             self.handle_input()
             if not self.is_paused:
@@ -1780,5 +1780,5 @@ class JackknifeGame25D:
         sys.exit(0)
 
 if __name__ == "__main__":
-    game = JackknifeGame25D("models/pfn_best.pt")
+    game = JackknifeGame25D("models/model.pt")
     game.run()

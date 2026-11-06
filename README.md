@@ -1,5 +1,3 @@
-# Jackknife: Autonomous B-Double Reversing with RL-PFNsF
-
 ![Showcase](.github/assets/showcase.gif)
 
 ## Quick Start
@@ -19,13 +17,13 @@ Install Dependencies
 uv sync
 ```
 
-Run the simulation in autonomous mode (loads `models/pfn_best.pt` by default):
+Run the simulation in autonomous mode (loads `models/model.pt` by default):
 
 ```bash
 uv run python main.py
 ```
 
-Train the Transformer policy using the streaming synthetic data pipeline:
+Train the ControlTransformer policy using the streaming synthetic data pipeline:
 
 ```bash
 uv run python main.py --train --epochs 100 --batch-size 64 --lr 3e-4 --stream

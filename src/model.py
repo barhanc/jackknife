@@ -20,18 +20,18 @@ def class_idx_to_steer(idx: int) -> float:
     return STEER_CLASSES_RAD[idx]
 
 
-class MultiTrailerPFN(nn.Module):
+class ControlTransformer(nn.Module):
     """
-    In-Context Policy Network (Transformer Policy) for B-Double multi-trailer reversing.
+    ControlTransformer policy network for B-Double multi-trailer reversing.
     
     Inputs:
-        tokens: (B, 32, 7) - Egocentric lookahead path stations in Trailer 2 local frame
+        tokens: (B, 64, 7) - Egocentric lookahead path stations in Trailer 2 local frame
                 [x_rel, y_rel, cos(theta_rel), sin(theta_rel), kappa, w_L, w_R]
         hitch_state: (B, 4) - Trailer hitch angles [sin(beta1), cos(beta1), sin(beta2), cos(beta2)]
         
     Outputs:
         logits: (B, 15) - Discrete steering angle classification logits
-        attn_weights: (B, 32) - Cross-attention weights over the 32 path tokens
+        attn_weights: (B, 64) - Cross-attention weights over the path tokens
     """
     def __init__(
         self,
@@ -172,3 +172,6 @@ class MultiTrailerPFN(nn.Module):
             
             attn_weights = attn.cpu().numpy()[0] if attn is not None else np.ones(t_tok.shape[1]) / float(t_tok.shape[1])
             return steer_rad, attn_weights, probs
+
+# Backward-compatibility alias
+MultiTrailerPFN = ControlTransformer

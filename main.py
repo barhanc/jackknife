@@ -4,21 +4,21 @@ import os
 import argparse
 
 def main():
-    parser = argparse.ArgumentParser(description="Multi-Trailer Reversing RL-PFN Simulation & Game")
+    parser = argparse.ArgumentParser(description="Multi-Trailer Reversing ControlTransformer Simulation & Game")
     parser.add_argument("--train", action="store_true", help="Run the synthetic training pipeline")
     parser.add_argument("--trajectories", type=int, default=180, help="Number of trajectories for training")
     parser.add_argument("--epochs", type=int, default=25, help="Training epochs")
     parser.add_argument("--batch-size", type=int, default=64, help="Training batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    parser.add_argument("--model-path", type=str, default="models/pfn_best.pt", help="Path to checkpoint")
+    parser.add_argument("--model-path", type=str, default="models/model.pt", help="Path to checkpoint")
     parser.add_argument("--from-scratch", action="store_true", default=True, help="Train model from scratch (do not load old checkpoint)")
     parser.add_argument("--resume", action="store_true", help="Resume from existing checkpoint")
-    parser.add_argument("--stream", action="store_true", help="True PFN streaming mode (sample fresh trajectories continuously)")
+    parser.add_argument("--stream", action="store_true", help="Dynamic streaming mode (sample fresh trajectories continuously)")
     args = parser.parse_args()
 
     if args.train:
         from src.train import train_model
-        print("Launching RL-PFN synthetic training pipeline...")
+        print("Launching ControlTransformer synthetic training pipeline...")
         train_model(
             num_trajectories=args.trajectories,
             epochs=args.epochs,

@@ -9,14 +9,14 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
 from src.data_generator import SyntheticDataGenerator, ReversingDataset
-from src.model import MultiTrailerPFN, NUM_STEER_CLASSES
+from src.model import ControlTransformer, NUM_STEER_CLASSES
 
 def train_model(
     num_trajectories: int = 60,
     epochs: int = 30,
     batch_size: int = 64,
     lr: float = 1e-3,
-    save_path: str = "models/pfn_best.pt",
+    save_path: str = "models/model.pt",
     device_str: Optional[str] = None,
     from_scratch: bool = True,
     stream: bool = True
@@ -29,7 +29,7 @@ def train_model(
         device = torch.device(device_str)
 
     print(f"==================================================")
-    print(f" Multi-Trailer Reversing RL-PFN Training Pipeline ")
+    print(f" Multi-Trailer Reversing ControlTransformer Pipeline ")
     print(f" Device: {device} | From Scratch: {from_scratch} | Stream: {stream}")
     print(f"==================================================")
 
@@ -40,7 +40,7 @@ def train_model(
     val_dataset = generator.generate_dataset(num_trajectories=30, perturb_ratio=0.5)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    model = MultiTrailerPFN().to(device)
+    model = ControlTransformer().to(device)
     if not from_scratch and os.path.exists(save_path):
         try:
             ckpt = torch.load(save_path, map_location=device)
@@ -52,7 +52,7 @@ def train_model(
         print("Training model from fresh random weights (from scratch).")
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"MultiTrailerPFN architecture initialized ({total_params:,} parameters).")
+    print(f"ControlTransformer architecture initialized ({total_params:,} parameters).")
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -82,7 +82,7 @@ def train_model(
 
     for epoch in range(1, epochs + 1):
         if stream:
-            # True PFN dynamic sampling: sample fresh trajectories every epoch
+            # Dynamic streaming: sample fresh trajectories every epoch
             t_gen = time.time()
             train_dataset = generator.generate_dataset(num_trajectories=num_trajectories, perturb_ratio=0.5)
             train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
@@ -190,7 +190,7 @@ def train_model(
             'metrics_history': metrics_history
         }
         torch.save(checkpoint_dict, save_path)
-        epoch_save_path = os.path.join(os.path.dirname(save_path), f"pfn_epoch_{epoch}.pt")
+        epoch_save_path = os.path.join(os.path.dirname(save_path), f"epoch_{epoch}.pt")
         torch.save(checkpoint_dict, epoch_save_path)
         print(f" -> Checkpoint saved to {save_path} and {epoch_save_path} (Latest: Epoch {epoch}, Val Adj Acc: {val_adj:.1f}%)")
 
@@ -203,8 +203,8 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--save-path", type=str, default="models/pfn_best.pt")
-    parser.add_argument("--no-stream", action="store_true", help="Disable on-the-fly streaming (not recommended for PFN)")
+    parser.add_argument("--save-path", type=str, default="models/model.pt")
+    parser.add_argument("--no-stream", action="store_true", help="Disable on-the-fly streaming")
     parser.add_argument("--from-scratch", action="store_true", help="Start training from random weights instead of existing checkpoint")
     args = parser.parse_args()
 

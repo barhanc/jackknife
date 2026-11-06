@@ -11,7 +11,7 @@ from src.model import steer_to_class_idx, NUM_STEER_CLASSES
 
 class ReversingDataset(Dataset):
     """
-    In-memory PyTorch Dataset for Multi-Trailer Reversing RL-PFN.
+    In-memory PyTorch Dataset for Multi-Trailer Reversing ControlTransformer.
     Contains (lookahead_tokens: 64x7, hitch_state: 4, steer_class: int).
     """
     def __init__(self, tokens: np.ndarray, hitch_states: np.ndarray, steer_classes: np.ndarray):

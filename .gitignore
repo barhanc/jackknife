@@ -69,12 +69,12 @@ ENV/
 env.bak/
 venv.bak/
 
-# PyTorch large model weights & checkouts (tracked via Git LFS)
+# PyTorch model weights
 models/*.pt
-!models/pfn_best.pt
+!models/model.pt
 models/*.pth
 *.pt
-!models/pfn_best.pt
+!models/model.pt
 *.pth
 grokking_runner.log
 train_overnight.log
