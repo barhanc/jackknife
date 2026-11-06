@@ -223,7 +223,8 @@ def train_model(
             'metrics_history': metrics_history
         }
         torch.save(checkpoint_dict, save_path)
-        epoch_save_path = save_path.replace(".pt", f"_epoch_{epoch}.pt")
+        # Always save explicit per-epoch checkpoint models/pfn_epoch_{epoch}.pt
+        epoch_save_path = os.path.join(os.path.dirname(save_path), f"pfn_epoch_{epoch}.pt")
         torch.save(checkpoint_dict, epoch_save_path)
         print(f" -> Checkpoint saved to {save_path} and {epoch_save_path} (Latest: Epoch {epoch}, Val Adj Acc: {val_adj:.1f}%)")
 
