@@ -145,6 +145,9 @@ class JackknifeGame25D:
 
         # PyTorch Model
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if self.device.type == "cpu":
+            # Batch-one inference is faster without CPU thread-pool overhead.
+            torch.set_num_threads(1)
         self.model: Optional[ControlTransformer] = None
         self.model_path = model_path
         self.model_mtime = 0.0
@@ -159,6 +162,8 @@ class JackknifeGame25D:
         self.has_arrived = False
         self.is_off_track = False
         self.dt = 0.02
+        self.simulation_accumulator = 0.0
+        self.steps_until_inference = 0
         self.current_speed = 0.0
         self.target_steer = 0.0
         self.current_path_idx = 0  # Monotonic curve arc-length tracker (handles 8-shapes and loops)
@@ -198,14 +203,18 @@ class JackknifeGame25D:
         """
         self.ui_scale = max(1.0, min(self.width / 1400.0, self.height / 900.0))
         s = self.ui_scale
-        self.font_big_alert = pygame.font.SysFont("ubuntusans,liberationsans,dejavusans", max(18, int(34 * s)), bold=True)
-        self.font_big_sub   = pygame.font.SysFont("ubuntumono,liberationmono,dejavusansmono", max(11, int(15 * s)), bold=True)
-        self.font_alert     = pygame.font.SysFont("ubuntusans,liberationsans,dejavusans", max(14, int(22 * s)), bold=True)
-        self.font_title     = pygame.font.SysFont("ubuntusans,liberationsans,dejavusans", max(11, int(15 * s)), bold=True)
-        self.font_mono      = pygame.font.SysFont("ubuntumono,liberationmono,dejavusansmono", max(10, int(13 * s)))
-        self.font_mono_bold = pygame.font.SysFont("ubuntumono,liberationmono,dejavusansmono", max(10, int(14 * s)), bold=True)
-        self.font_badge     = pygame.font.SysFont("ubuntusans,liberationsans,dejavusans", max(9, int(12 * s)), bold=True)
-        self.font_sm        = pygame.font.SysFont("ubuntumono,liberationmono,dejavusansmono", max(8, int(11 * s)))
+        font_dir = os.path.join(os.path.dirname(__file__), "..", "assets", "fonts")
+        sans_bold = os.path.join(font_dir, "DejaVuSans-Bold.ttf")
+        mono = os.path.join(font_dir, "DejaVuSansMono.ttf")
+        mono_bold = os.path.join(font_dir, "DejaVuSansMono-Bold.ttf")
+        self.font_big_alert = pygame.font.Font(sans_bold, max(18, int(34 * s)))
+        self.font_big_sub   = pygame.font.Font(mono_bold, max(11, int(15 * s)))
+        self.font_alert     = pygame.font.Font(sans_bold, max(14, int(22 * s)))
+        self.font_title     = pygame.font.Font(sans_bold, max(11, int(15 * s)))
+        self.font_mono      = pygame.font.Font(mono, max(10, int(13 * s)))
+        self.font_mono_bold = pygame.font.Font(mono_bold, max(10, int(14 * s)))
+        self.font_badge     = pygame.font.Font(sans_bold, max(9, int(12 * s)))
+        self.font_sm        = pygame.font.Font(mono, max(8, int(11 * s)))
 
     def _build_vignette(self):
         self.vignette_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
@@ -428,6 +437,9 @@ class JackknifeGame25D:
         self.current_speed = 0.0
         self.target_steer = 0.0
         self.current_path_idx = 0
+        self.simulation_accumulator = 0.0
+        self.steps_until_inference = 0
+        self.steer_hold_time = 0.0
         self.has_arrived = False
         self.is_off_track = False
         self.auto_frame_camera(instant=True)
@@ -457,7 +469,9 @@ class JackknifeGame25D:
         """
         if self.width <= 0 or self.height <= 0:
             return
-        self.background_surf = pygame.Surface((self.width, self.height))
+        # Explicit depth keeps this opaque: macOS display formats can otherwise
+        # contribute an unwanted alpha channel that breaks overlay compositing.
+        self.background_surf = pygame.Surface((self.width, self.height), depth=32)
         self.draw_night_ground(self.background_surf)
         self.draw_path_static(self.background_surf)
         if self.vignette_surf is not None:
@@ -466,9 +480,8 @@ class JackknifeGame25D:
     def generate_procedural_yard(self):
         pass
 
-    def handle_input(self):
-        keys = pygame.key.get_pressed()
-
+    def update_controls(self, keys):
+        """Apply held controls once per physics step, including during fast-forward."""
         # Keyboard Driving in Manual Mode
         if self.mode == "MANUAL" and not self.ai_save_active:
             # Smooth, realistic truck power steering (delicate micro-taps, progressive turns)
@@ -501,6 +514,7 @@ class JackknifeGame25D:
         elif self.mode == "AUTONOMOUS" or self.ai_save_active:
             self.current_speed = 0.0 if (self.has_arrived or self.is_off_track or self.is_paused) else -1.5
 
+    def handle_input(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.is_running = False
@@ -1490,54 +1504,74 @@ class JackknifeGame25D:
     # THEMATIC FROSTED GLASS HUD WITH REFINED DISTRIBUTION PLOT
     # ==========================================================================
 
+    def draw_top_hud(self):
+        s = self.ui_scale
+        pad, gap = int(12 * s), int(12 * s)
+        row_h, button_h = int(40 * s), int(36 * s)
+        gear = "REVERSE" if self.current_speed < -0.1 else ("FORWARD" if self.current_speed > 0.1 else "PARKED")
+        gear_text = self.font_mono_bold.render(gear, True, COLOR_ACCENT_AMBER)
+        speed_text = self.font_mono_bold.render(f"SPEED {self.time_multiplier}x", True, COLOR_ACCENT_CYAN)
+        sample_text = self.font_mono_bold.render("SAMPLE PATH", True, COLOR_TEXT_WHITE)
+        key_w = max(self.font_sm.size("T")[0], self.font_sm.size("P")[0]) + int(12 * s)
+
+        # Measure contents instead of relying on font-specific pixel offsets.
+        gear_w = self.font_mono_bold.size("REVERSE")[0] + 2 * pad
+        velocity = f"{self.current_speed:+.1f} m/s"
+        latency = f"{self.inference_time_ms:.1f} ms"
+        velocity_w = max(self.font_mono.size(velocity)[0], self.font_mono.size("+2.0 m/s")[0])
+        latency_w = max(self.font_mono.size(latency)[0], self.font_sm.size("INFERENCE")[0])
+        speed_w = self.font_mono_bold.size("SPEED 16x")[0] + key_w + 3 * pad
+        sample_w = sample_text.get_width() + key_w + 3 * pad
+        widths = [gear_w, velocity_w, latency_w, speed_w, sample_w]
+        bar_w = min(sum(widths) + 4 * gap + 2 * pad, max(1, self.width - 2 * pad))
+        rects = []
+        x, y = pad, pad
+        for width in widths:
+            if x > pad and x + width > bar_w - pad:
+                x, y = pad, y + row_h + gap
+            rects.append(pygame.Rect(x, y, width, row_h))
+            x += width + gap
+        bar_h = y + row_h + pad
+        bar_x = (self.width - bar_w) // 2
+        help_left = self.width - int(270 * s)
+        if self.show_help and help_left - gap - bar_w >= pad:
+            bar_x = min(bar_x, help_left - gap - bar_w)
+        self.top_hud_rect = pygame.Rect(bar_x, int(20 * s), bar_w, bar_h)
+        bar = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
+        pygame.draw.rect(bar, COLOR_HUD_BG, bar.get_rect(), border_radius=int(12 * s))
+        pygame.draw.rect(bar, COLOR_HUD_BORDER, bar.get_rect(), 1, border_radius=int(12 * s))
+
+        badge = rects[0].inflate(0, -int(10 * s))
+        pygame.draw.rect(bar, (54, 39, 23), badge, border_radius=int(6 * s))
+        bar.blit(gear_text, gear_text.get_rect(center=badge.center))
+        for rect, label, value in [(rects[1], "VELOCITY", velocity), (rects[2], "INFERENCE", latency)]:
+            heading = self.font_sm.render(label, True, COLOR_TEXT_DIM)
+            text = self.font_mono.render(value, True, COLOR_TEXT_WHITE)
+            bar.blit(heading, heading.get_rect(midtop=(rect.centerx, rect.top)))
+            bar.blit(text, text.get_rect(midbottom=(rect.centerx, rect.bottom)))
+
+        mouse = pygame.mouse.get_pos()
+        for rect, text, shortcut, attr, accent in [
+            (rects[3], speed_text, "T", "speed_btn_rect", COLOR_ACCENT_CYAN),
+            (rects[4], sample_text, "P", "sample_btn_rect", COLOR_ACCENT_AMBER),
+        ]:
+            button = pygame.Rect(rect.x, rect.centery - button_h // 2, rect.w, button_h)
+            hitbox = button.move(self.top_hud_rect.topleft)
+            setattr(self, attr, hitbox)
+            hover = hitbox.collidepoint(mouse)
+            pygame.draw.rect(bar, (35, 49, 66) if hover else (23, 33, 46), button, border_radius=int(7 * s))
+            pygame.draw.rect(bar, accent if hover else (57, 75, 97), button, 1, border_radius=int(7 * s))
+            key_rect = pygame.Rect(button.right - pad - key_w, button.centery - int(10 * s), key_w, int(20 * s))
+            pygame.draw.rect(bar, (12, 19, 29), key_rect, border_radius=int(4 * s))
+            key = self.font_sm.render(shortcut, True, COLOR_TEXT_DIM)
+            bar.blit(key, key.get_rect(center=key_rect.center))
+            text_area = pygame.Rect(button.left + pad, button.top, key_rect.left - button.left - 2 * pad, button.h)
+            bar.blit(text, text.get_rect(center=text_area.center))
+        self.screen.blit(bar, self.top_hud_rect)
+
     def draw_hud(self):
         s = self.ui_scale
-
-        # 1. Top Minimal Status Pill Bar (Clean, with Interactive Speed Warp & Sample Prior Buttons)
-        bar_w, bar_h = int(600 * s), int(38 * s)
-        bar_x = (self.width - bar_w) // 2
-        bar_y = int(16 * s)
-        bar_surf = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
-        pygame.draw.rect(bar_surf, COLOR_HUD_BG, (0, 0, bar_w, bar_h), border_radius=int(19 * s))
-        pygame.draw.rect(bar_surf, COLOR_HUD_BORDER, (0, 0, bar_w, bar_h), 1, border_radius=int(19 * s))
-
-        gear_str = "REV" if self.current_speed < -0.1 else ("FWD" if self.current_speed > 0.1 else "PARK")
-        bar_surf.blit(self.font_mono_bold.render(f"GEAR: {gear_str}", True, COLOR_ACCENT_AMBER), (int(16 * s), int(10 * s)))
-        bar_surf.blit(self.font_mono.render(f"v = {self.current_speed:+.1f} m/s", True, COLOR_TEXT_WHITE), (int(104 * s), int(10 * s)))
-        bar_surf.blit(self.font_mono.render(f"{self.inference_time_ms:.1f}ms", True, COLOR_TEXT_DIM), (int(212 * s), int(10 * s)))
-
-        # 1a. Interactive Clickable Speed Button
-        btn_w_spd, btn_h = int(122 * s), int(30 * s)
-        btn_spd_local = pygame.Rect(bar_w - int(282 * s), int(4 * s), btn_w_spd, btn_h)
-        self.speed_btn_rect = pygame.Rect(bar_x + btn_spd_local.x, bar_y + btn_spd_local.y, btn_spd_local.w, btn_spd_local.h)
-        mouse_pos = pygame.mouse.get_pos()
-        is_spd_hover = self.speed_btn_rect.collidepoint(mouse_pos)
-
-        spd_bg = (38, 58, 82, 240) if is_spd_hover else ((24, 44, 64, 210) if self.time_multiplier > 1 else (22, 28, 38, 180))
-        spd_border = (0, 230, 255) if is_spd_hover else (COLOR_ACCENT_CYAN if self.time_multiplier > 1 else (55, 70, 90))
-        pygame.draw.rect(bar_surf, spd_bg, btn_spd_local, border_radius=int(15 * s))
-        pygame.draw.rect(bar_surf, spd_border, btn_spd_local, 1, border_radius=int(15 * s))
-
-        spd_col = (255, 255, 255) if is_spd_hover else (COLOR_ACCENT_CYAN if self.time_multiplier > 1 else (170, 182, 198))
-        spd_txt = self.font_mono_bold.render(f"SPEED: {self.time_multiplier}x [T]", True, spd_col)
-        bar_surf.blit(spd_txt, (btn_spd_local.centerx - spd_txt.get_width() // 2, int(7 * s)))
-
-        # 1b. Interactive Clickable Sample Random Path Button (from Prior)
-        btn_w_smp = int(144 * s)
-        btn_smp_local = pygame.Rect(bar_w - int(150 * s), int(4 * s), btn_w_smp, btn_h)
-        self.sample_btn_rect = pygame.Rect(bar_x + btn_smp_local.x, bar_y + btn_smp_local.y, btn_smp_local.w, btn_smp_local.h)
-        is_smp_hover = self.sample_btn_rect.collidepoint(mouse_pos)
-
-        smp_bg = (42, 64, 88, 240) if is_smp_hover else (24, 38, 54, 200)
-        smp_border = (255, 215, 65) if is_smp_hover else (65, 95, 130)
-        pygame.draw.rect(bar_surf, smp_bg, btn_smp_local, border_radius=int(15 * s))
-        pygame.draw.rect(bar_surf, smp_border, btn_smp_local, 1, border_radius=int(15 * s))
-
-        smp_col = (255, 255, 255) if is_smp_hover else COLOR_ACCENT_AMBER
-        smp_txt = self.font_mono_bold.render("SAMPLE PATH [P]", True, smp_col)
-        bar_surf.blit(smp_txt, (btn_smp_local.centerx - smp_txt.get_width() // 2, int(7 * s)))
-
-        self.screen.blit(bar_surf, (bar_x, bar_y))
+        self.draw_top_hud()
 
         # 2. Sleek Simplified Stability Margin Card (Lower Right Corner)
         sm_w, sm_h = int(240 * s), int(64 * s)
@@ -1674,7 +1708,10 @@ class JackknifeGame25D:
                 h_surf.blit(self.font_mono_bold.render(k_tag, True, COLOR_ACCENT_AMBER), (int(14 * s), int(34 * s) + i * line_h))
                 h_surf.blit(self.font_mono.render(desc, True, COLOR_TEXT_DIM), (desc_x, int(34 * s) + i * line_h))
 
-            self.screen.blit(h_surf, (self.width - h_w - int(20 * s), int(20 * s)))
+            help_rect = pygame.Rect(self.width - h_w - int(20 * s), int(20 * s), h_w, h_h)
+            if help_rect.colliderect(self.top_hud_rect):
+                help_rect.top = self.top_hud_rect.bottom + int(12 * s)
+            self.screen.blit(h_surf, help_rect)
 
         # 5. Drawing & Prominent Center Messages
         if self.is_drawing:
@@ -1760,27 +1797,47 @@ class JackknifeGame25D:
         self.draw_hud()
         pygame.display.flip()
 
+    def advance_simulation(self, elapsed_seconds: float, keys=None):
+        """Advance fixed steps with the same policy cadence at every speed.
+
+        Ignore wall-time beyond 250 ms after a stall (e.g. dragging the window)
+        so resuming cannot trigger an unbounded physics catch-up loop.
+        """
+        if self.is_paused:
+            self.simulation_accumulator = 0.0
+            return
+        if keys is None:
+            keys = pygame.key.get_pressed()
+        self.simulation_accumulator += min(max(elapsed_seconds, 0.0), 0.25) * self.time_multiplier
+        while self.simulation_accumulator + 1e-12 >= self.dt:
+            self.update_controls(keys)
+            # 12.5 Hz in simulation time at every speed; physics stays at 50 Hz.
+            # Carry the phase across rendered frames to preserve trajectories.
+            self.update_physics(run_inference=self.steps_until_inference == 0)
+            self.steps_until_inference = (self.steps_until_inference - 1) % 4
+            self.simulation_accumulator = max(0.0, self.simulation_accumulator - self.dt)
+            if self.has_arrived or self.kinematics.is_jackknifed(self.state) or self.is_off_track:
+                self.simulation_accumulator = 0.0
+                break
+
     def run(self):
         print("Launching Clean 2.5D Top-Down Simulation Game...")
+        previous_time = time.perf_counter()
         while self.is_running:
+            self.clock.tick(60)
+            now = time.perf_counter()
+            elapsed_seconds = now - previous_time
+            previous_time = now
             self.handle_input()
-            if not self.is_paused:
-                substeps = self.time_multiplier
-                # Decouple inference: neural policy runs at realistic control rate (~12-25Hz),
-                # while RK4 handles sub-stepping smoothly
-                infer_interval = 4 if substeps >= 8 else 1
-                for step_i in range(substeps):
-                    should_infer = (step_i % infer_interval == 0)
-                    self.update_physics(run_inference=should_infer)
-                    if self.has_arrived or self.kinematics.is_jackknifed(self.state) or self.is_off_track:
-                        break
+            if not self.is_running:
+                break
+            self.advance_simulation(elapsed_seconds)
 
             # Per-frame camera updates
             self.camera.update()
             self.frame_count += 1
 
             self.render()
-            self.clock.tick(60)
 
         pygame.quit()
         sys.exit(0)
