@@ -1,6 +1,6 @@
 /** Browser entry point: rendering and input remain live during asynchronous inference. */
 import tgpu from 'typegpu';
-import { loadPolicy } from './inference/policy';
+import { createWorkerPolicy } from './inference/workerPolicy';
 import { Game } from './simulation/game';
 import { sampleRoute } from './simulation/generator';
 import { drawnRoute, tokensFor, type Route } from './simulation/path';
@@ -21,7 +21,7 @@ async function boot() {
   root.device.addEventListener('uncapturederror', (e) => console.error('WebGPU:', e.error.message));
   hud.loading('Loading the steering network…');
   const [policy, routeResponse, assets] = await Promise.all([
-    loadPolicy(root),
+    createWorkerPolicy(),
     fetch(`${import.meta.env.BASE_URL}models/track.json`),
     loadAssets(),
   ]);

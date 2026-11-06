@@ -180,7 +180,7 @@ class JackknifeGame25D:
         self.current_speed = 0.0
         self.target_steer = 0.0
         self.current_path_idx = 0  # Monotonic curve arc-length tracker (handles 8-shapes and loops)
-        self.time_multiplier = 1   # Fast-forward simulation speed warp: 1x through 16x
+        self.time_multiplier = 16  # Fast-forward simulation speed warp: 1x through 16x
         self.speed_options = [1, 2, 4, 8, 16]
 
         # Drawing mode

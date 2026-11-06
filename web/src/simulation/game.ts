@@ -15,7 +15,7 @@ import { progression, tokensFor, type Route } from './path';
 export class Game {
   state;
   mode: 'MANUAL' | 'AUTONOMOUS' = 'AUTONOMOUS';
-  speedMultiplier = 1;
+  speedMultiplier = 16;
   speed = 0;
   targetSteer = 0;
   index = 0;

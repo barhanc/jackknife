@@ -34,6 +34,8 @@ const canvas = (width: number, height: number) => {
   const c = document.createElement('canvas');
   c.width = width;
   c.height = height;
+  // These are CPU masks: placement and road-paint checks repeatedly read their pixels.
+  c.getContext('2d', { willReadFrequently: true });
   return c;
 };
 function capsules(camera: Camera, points: Point[], radius: number) {

@@ -11,7 +11,7 @@ test('policy parity, telemetry, drawing, manual jackknife and autonomous complet
   page.on('console', (m) => {
     if (m.type() === 'error' && m.text().includes('WebGPU:')) errors.push(m.text());
   });
-  await page.goto('/?test');
+  await page.goto('/?test&precision=fp32');
   await page.waitForFunction('Boolean(window.jackknifeTest)', undefined, { timeout: 60_000 });
   const parity = await harness(page, 'window.jackknifeTest.parity()');
   if (!Array.isArray(parity)) throw new Error('Parity harness returned no results.');

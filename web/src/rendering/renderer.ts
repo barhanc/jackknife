@@ -6,12 +6,14 @@ import { type Assets, css, polygon, line, rect, fill } from './assets';
 import { type Camera, boxPoints, configureDepot, paintTerrain } from './terrain';
 import { Mesh, createPainter } from './primitives';
 import { vehicle } from './vehicle';
+import { createAttentionLayer } from './attention';
 export function createRenderer(
   root: TgpuRoot,
   canvas: HTMLCanvasElement,
   game: Game,
   assets: Assets,
 ) {
+  const attentionLayer = createAttentionLayer();
   const painter = createPainter(root, canvas),
     host = canvas.parentElement!;
   const layer = (id: string, z: string) => {
@@ -35,6 +37,7 @@ export function createRenderer(
     elapsed = 0,
     last = 0;
   let depot = configureDepot(route);
+  const backgrounds = new Map<string, HTMLCanvasElement>();
   const resize = () => {
     const r = canvas.getBoundingClientRect(),
       width = Math.max(1, Math.round(r.width)),
@@ -173,6 +176,7 @@ export function createRenderer(
       if (game.route !== route) {
         route = game.route;
         depot = configureDepot(route);
+        backgrounds.clear();
         dirty = true;
       }
       if (game.drawing !== editing) {
@@ -180,15 +184,19 @@ export function createRenderer(
         dirty = true;
       }
       if (dirty) {
-        paintTerrain(
-          back,
-          camera,
-          assets,
-          route,
-          editing,
-          Math.max(1, Math.min(innerWidth / 1400, innerHeight / 900)),
-          depot,
-        );
+        const uiScale = Math.max(1, Math.min(innerWidth / 1400, innerHeight / 900));
+        const key = `${camera.width}/${camera.height}/${editing}/${uiScale}`;
+        const cached = backgrounds.get(key);
+        if (cached) back.drawImage(cached, 0, 0);
+        else {
+          paintTerrain(back, camera, assets, route, editing, uiScale, depot);
+          const snapshot = document.createElement('canvas');
+          snapshot.width = camera.width;
+          snapshot.height = camera.height;
+          snapshot.getContext('2d')!.drawImage(ground, 0, 0);
+          backgrounds.set(key, snapshot);
+          if (backgrounds.size > 2) backgrounds.delete(backgrounds.keys().next().value!);
+        }
         dirty = false;
       }
       dynamic.clearRect(0, 0, camera.width, camera.height);
@@ -254,18 +262,22 @@ export function createRenderer(
           }
         }
         if (game.mode === 'AUTONOMOUS' && game.rays) {
-          const from = camera.project(x0 + 3.5 * 0.4 * c, y0 + 3.5 * 0.4 * s),
-            max = Math.max(...game.attention, 0.001);
-          for (let i = 0; i < 64; i++) {
-            const weight = game.attention[i] / max;
-            if (weight > 0.15) {
-              const to = camera.project(
-                ...route.points[Math.min(route.points.length - 1, game.index + i)],
-              );
-              line(dynamic, from, to, [45, 180, 225], 2, Math.trunc(weight * 55) / 255);
-              line(dynamic, from, to, [185, 235, 255], 1, Math.trunc(weight * 135) / 255);
-            }
-          }
+          const from = camera.project(x0 + 3.5 * 0.4 * c, y0 + 3.5 * 0.4 * s);
+          const peak = Math.max(...game.attention, 0.001);
+          const rays = game.attention.flatMap((value, i) => {
+            const weight = value / peak;
+            return weight > 0.15
+              ? [
+                  {
+                    point: camera.project(
+                      ...route.points[Math.min(route.points.length - 1, game.index + i)],
+                    ),
+                    weight,
+                  },
+                ]
+              : [];
+          });
+          attentionLayer.draw(dynamic, from, rays);
         }
         dockLights(dynamic, false);
         vehicle(mesh, game.state);

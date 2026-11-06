@@ -22,6 +22,18 @@ localhost) is required. The first load downloads about 25 MiB of weights and
 compiles the model's shaders. No backend, Python process, or inference service is
 needed once the static site is built.
 
+Inference uses FP16 weights and activations on adapters with `shader-f16`, with
+FP32 matrix accumulation. Other adapters use FP32. Add `?precision=fp32` to force
+the reference path, or `?precision=fp16` to require half precision. Weights are
+converted during loading; the checkpoint and download remain FP32. On an M1 Pro,
+300 warmed inference calls without rendering measured roughly 3.2–3.3 ms median
+in FP16 versus 3.6 ms in FP32. This is a local measurement, not a speed guarantee.
+
+The policy runs in a dedicated worker so rendering cannot stall its readback
+callbacks or inflate the inference timer. Attention rays use a single pixel
+layer per frame; CPU terrain masks use readback-friendly canvases. Opening
+telemetry reuses cached terrain for previously visited viewport layouts.
+
 ```sh
 npm test
 npm run build
@@ -43,7 +55,8 @@ W/S or arrows drive forward/reverse, A/D steer, Space pauses, M changes steering
 mode, T changes simulation speed, E starts/cancels route drawing, R resets,
 V toggles attention rays, and H toggles telemetry. The buttons expose the same
 controls. Draw routes with a mouse, pen or touch; a straight lead-in is added.
-Telemetry starts open. Switching to autonomous mode selects 16× speed. Losing
+The game starts in autonomous mode at 16× with telemetry open. Switching to
+autonomous mode also selects 16× speed. Losing
 focus pauses the game.
 
 The simulation uses the desktop's 50 Hz fixed timestep and a policy update every
@@ -88,3 +101,7 @@ driving currently requires a keyboard. Inference telemetry uses a wall-time
 exponential moving average with a half-second time constant at every speed. The
 histogram and its expected-steering marker use 120 ms display smoothing in both
 versions; controller outputs are unchanged.
+
+The favicon uses a red adaptation of Kenney's CC0 pixel truck sprite from the
+[Pixel Vehicle Pack](https://opengameart.org/content/pixel-vehicle-pack).
+Source and license details are in `public/licenses/favicon.txt`.

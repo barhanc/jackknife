@@ -40,6 +40,30 @@ export function attachHarness(game: Game, policy: Policy, root: TgpuRoot) {
         painter.dispose();
         return { png, commands };
       },
+      async inferenceDuringRenderBlock() {
+        game.setPaused(true);
+        const sample = (await (await fetch(`${import.meta.env.BASE_URL}models/parity.json`)).json())
+          .cases[0];
+        const tokens = new Float32Array(sample.tokens.flat()),
+          hitch = new Float32Array(sample.hitch);
+        const baseline = await policy.predict(tokens, hitch);
+        const blockedFor = Math.max(150, Math.min(1000, baseline.milliseconds * 5));
+        const start = performance.now();
+        const request = policy.predict(
+          new Float32Array(sample.tokens.flat()),
+          new Float32Array(sample.hitch),
+        );
+        while (performance.now() - start < blockedFor) {
+          /* Deliberately block only the rendering thread. */
+        }
+        const result = await request;
+        return {
+          milliseconds: result.milliseconds,
+          mainThreadLatency: performance.now() - start,
+          baseline: baseline.milliseconds,
+          blockedFor,
+        };
+      },
       async benchmark(count = 200) {
         game.setPaused(true);
         const fixtures = await (
@@ -73,7 +97,19 @@ export function attachHarness(game: Game, policy: Policy, root: TgpuRoot) {
             new Float32Array(sample.tokens.flat()),
             new Float32Array(sample.hitch),
           );
+          const maximum = Math.max(...sample.logits);
+          const exponentials = sample.logits.map((x: number) => Math.exp(x - maximum));
+          const sum = exponentials.reduce((a: number, b: number) => a + b, 0);
+          const probabilities = exponentials.map((x: number) => x / sum);
+          const steering = probabilities.reduce(
+            (total: number, p: number, i: number) => total + p * (-35 + 5 * i),
+            0,
+          );
           results.push({
+            probabilityError: Math.max(
+              ...prediction.probabilities.map((x, i) => Math.abs(x - probabilities[i])),
+            ),
+            steeringErrorDegrees: Math.abs((prediction.steer * 180) / Math.PI - steering),
             logitError: Math.max(
               ...prediction.logits.map((x, i) => Math.abs(x - sample.logits[i])),
             ),

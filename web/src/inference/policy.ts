@@ -2,6 +2,12 @@
 import type { TgpuRoot } from 'typegpu';
 import {
   add,
+  ACC_F32,
+  f32ArrayToF16Bits,
+  setMatmulAccum,
+  uploadF16,
+  type F16Buffer,
+  type F32Buffer,
   cat,
   evalValues,
   gpuExecutor,
@@ -40,8 +46,14 @@ const attentionConfig = {
   windowRight: Infinity,
 };
 
-export async function loadPolicy(root: TgpuRoot) {
-  const base = `${import.meta.env.BASE_URL}models/`;
+export type Precision = 'f32' | 'f16';
+export async function loadPolicy(
+  root: TgpuRoot,
+  base = `${import.meta.env.BASE_URL}models/`,
+  precision: Precision = 'f32',
+) {
+  if (precision === 'f16' && !root.device.features.has('shader-f16'))
+    throw new Error('FP16 requires shader-f16 support.');
   const [manifestResponse, weightsResponse] = await Promise.all([
     fetch(base + 'manifest.json'),
     fetch(base + 'weights.bin'),
@@ -57,13 +69,31 @@ export async function loadPolicy(root: TgpuRoot) {
     throw new Error('Model checksum mismatch. Re-export the checkpoint.');
   initRunntime(root);
   const ex = gpuExecutor(root);
-  const buffers: ReturnType<typeof uploadF32>[] = [];
+  setMatmulAccum(ACC_F32);
+  const buffers: (F32Buffer | F16Buffer)[] = [];
+  const upload = (data: Float32Array) => {
+    if (precision === 'f32') return uploadF32(root, data);
+    const converted = f32ArrayToF16Bits(data);
+    if (converted.clamped) throw new Error('Model values exceed FP16 range.');
+    return uploadF16(root, converted.data);
+  };
+  const write = (buffer: F32Buffer | F16Buffer, data: Float32Array) => {
+    if (precision === 'f32') writeF32(root, buffer as F32Buffer, data);
+    else {
+      const converted = f32ArrayToF16Bits(data);
+      if (converted.clamped) throw new Error('Policy inputs exceed FP16 range.');
+      root.device.queue.writeBuffer(root.unwrap(buffer), 0, converted.data.buffer as ArrayBuffer);
+    }
+  };
   const weights = new Map<string, Value>();
   for (const [name, spec] of Object.entries(manifest.tensors)) {
     const data = new Float32Array(bytes, spec.offset, spec.length);
-    const buffer = uploadF32(root, data);
+    const buffer = upload(data);
     buffers.push(buffer);
-    weights.set(name, materialized({ dtype: 'f32', elems: spec.length, dims: spec.shape }, buffer));
+    weights.set(
+      name,
+      materialized({ dtype: precision, elems: spec.length, dims: spec.shape }, buffer),
+    );
   }
   const weight = (name: string) => {
     const value = weights.get(name);
@@ -100,11 +130,11 @@ export async function loadPolicy(root: TgpuRoot) {
     }
     return [dense(out, `${name}.out_proj`), attention];
   };
-  const tokenBuffer = uploadF32(root, new Float32Array(64 * 7));
-  const hitchBuffer = uploadF32(root, new Float32Array(4));
+  const tokenBuffer = upload(new Float32Array(64 * 7));
+  const hitchBuffer = upload(new Float32Array(4));
   buffers.push(tokenBuffer, hitchBuffer);
-  const tokens = materialized(matrix(64, 7), tokenBuffer);
-  const hitch = materialized(matrix(1, 4), hitchBuffer);
+  const tokens = materialized({ ...matrix(64, 7), dtype: precision }, tokenBuffer);
+  const hitch = materialized({ ...matrix(1, 4), dtype: precision }, hitchBuffer);
   const forward = () => {
     let memory = add(dense(tokens, 'token_proj'), weight('pos_embed'));
     for (let i = 0; i < 6; i++) {
@@ -156,8 +186,8 @@ export async function loadPolicy(root: TgpuRoot) {
       busy = true;
       const start = performance.now();
       try {
-        writeF32(root, tokenBuffer, tokens);
-        writeF32(root, hitchBuffer, hitch);
+        write(tokenBuffer, tokens);
+        write(hitchBuffer, hitch);
         const pending = ex.readbackOnSubmit(captured.targets);
         captured.replay();
         const result = await pending;
