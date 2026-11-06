@@ -13,9 +13,11 @@ os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
 from src.kinematics import TractorDoubleTrailerKinematics, VehicleDimensions, VehicleState
 from src.path_generator import Path, smooth_and_constrain_user_path, generate_synthetic_path
 from src.model import ControlTransformer
-from .hud import GameHUD
+from .hud import AMBER, GameHUD
 from .depot import DepotTerrain
 from .lighting import TruckLighting
+from .vehicle import VehicleRenderer
+from .weather import Snowfall
 
 # ==============================================================================
 # CLEAN 2.5D NIGHT DIORAMA PALETTE (Tactile Top-Down View)
@@ -66,7 +68,6 @@ COLOR_TAILLIGHT_RED   = (255, 45, 55)      # Red rear taillight glow
 COLOR_TARGET_GREEN    = (60, 240, 145)     # Soft green terminus badge
 COLOR_STATUS_GREEN    = (60, 240, 145)     # Status emerald
 COLOR_ACCENT_AMBER    = (245, 175, 55)
-COLOR_ACCENT_CYAN     = (65, 195, 235)
 
 # Frosted Glass HUD
 COLOR_HUD_BG          = (15, 19, 27, 230)
@@ -153,6 +154,7 @@ class JackknifeGame25D:
         self.camera = TopDownCamera(self.width, self.height, yard_w=160.0, yard_h=100.0)
         self.terrain = DepotTerrain(self.camera.yard_w, self.camera.yard_h)
         self.lighting = TruckLighting()
+        self.snowfall = Snowfall()
 
         # PyTorch Model
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -505,6 +507,8 @@ class JackknifeGame25D:
         if self.mode == "MANUAL":
             self.has_arrived = False
             self.is_off_track = False
+        else:
+            self.time_multiplier = 16
 
     def start_drawing_mode(self):
         if self.drawing_mode:
@@ -755,437 +759,12 @@ class JackknifeGame25D:
 
 
     def draw_vehicle_shadows(self):
-        x0, y0, th0 = self.state.x0, self.state.y0, self.state.theta0
-        dims = self.dims
-        x1, y1, th1 = self.kinematics.get_trailer1_axle(self.state)
-        x2, y2, th2 = self.kinematics.get_trailer2_axle(self.state)
-
-        cos_t0, sin_t0 = math.cos(th0), math.sin(th0)
-        cos_t1, sin_t1 = math.cos(th1), math.sin(th1)
-        cos_t2, sin_t2 = math.cos(th2), math.sin(th2)
-
-        def get_poly(cx: float, cy: float, heading: float, length: float, width: float):
-            hl, hw = length / 2.0, width / 2.0
-            ch, sh = math.cos(heading), math.sin(heading)
-            return [
-                self.camera.project(cx + hl*ch - hw*sh, cy + hl*sh + hw*ch),
-                self.camera.project(cx - hl*ch - hw*sh, cy - hl*sh + hw*ch),
-                self.camera.project(cx - hl*ch + hw*sh, cy - hl*sh - hw*ch),
-                self.camera.project(cx + hl*ch + hw*sh, cy + hl*sh - hw*ch)
-            ]
-
-        s_off = (max(2, round(self.camera.scale * 0.35)), max(3, round(self.camera.scale * 0.55)))
-        for cx, cy, th, l, w in [
-            (x0 + 1.8 * cos_t0, y0 + 1.8 * sin_t0, th0, 5.3, dims.cab_width + 0.1),
-            (x0 - 1.85 * cos_t1, y0 - 1.85 * sin_t1, th1, 5.2, dims.trailer1_width),
-            (x2 + (dims.L2 - 3.0) * cos_t2, y2 + (dims.L2 - 3.0) * sin_t2, th2, 7.7, dims.trailer2_width)
-        ]:
-            poly = get_poly(cx, cy, th, l, w)
-            s_poly = [(p[0] + s_off[0], p[1] + s_off[1]) for p in poly]
-            pygame.draw.polygon(self.dynamic_alpha_surf, (10, 14, 20, 160), s_poly)
+        VehicleRenderer().draw_shadows(
+            self.dynamic_alpha_surf, self.camera, self.state, self.dims, self.kinematics,
+        )
 
     def draw_truck_and_trailers(self):
-        """
-        Render a raised amber tractor, short blue lead trailer with an exposed
-        fifth-wheel deck, and longer sea-green rear semi-trailer. All elevation
-        and shading are visual; axle locations and articulation stay physical.
-        """
-        x0, y0, th0 = self.state.x0, self.state.y0, self.state.theta0
-        dims = self.dims
-        x1, y1, th1 = self.kinematics.get_trailer1_axle(self.state)
-        x2, y2, th2 = self.kinematics.get_trailer2_axle(self.state)
-
-        cos_t0, sin_t0 = math.cos(th0), math.sin(th0)
-        cos_t1, sin_t1 = math.cos(th1), math.sin(th1)
-        cos_t2, sin_t2 = math.cos(th2), math.sin(th2)
-
-        # Helper for oriented 2D bounding boxes
-        def get_poly(cx: float, cy: float, heading: float, length: float, width: float):
-            hl, hw = length / 2.0, width / 2.0
-            ch, sh = math.cos(heading), math.sin(heading)
-            return [
-                self.camera.project(cx + hl*ch - hw*sh, cy + hl*sh + hw*ch),
-                self.camera.project(cx - hl*ch - hw*sh, cy - hl*sh + hw*ch),
-                self.camera.project(cx - hl*ch + hw*sh, cy - hl*sh - hw*ch),
-                self.camera.project(cx + hl*ch + hw*sh, cy + hl*sh - hw*ch)
-            ]
-
-        def raised(points, height):
-            lift = max(1, round(height * self.camera.scale))
-            return [(x, y - lift) for x, y in points]
-
-        def draw_raised_body(points, roof, side, height):
-            top = raised(points, height)
-            # Fixed screen-space elevation keeps the lighting coherent as bodies rotate.
-            for i, start in enumerate(points):
-                j = (i + 1) % len(points)
-                end = points[j]
-                shade = 1.15 if end[0] > start[0] else 0.8
-                wall = tuple(min(255, round(c * shade)) for c in side)
-                pygame.draw.polygon(self.screen, wall, [start, end, top[j], top[i]])
-            pygame.draw.polygon(self.screen, roof, top)
-            pygame.draw.polygon(self.screen, side, top, 1)
-            return top
-
-        def draw_roof_details(cx, cy, heading, length, width, roof, height=0.48):
-            ch, sh = math.cos(heading), math.sin(heading)
-            def point(lx, ly):
-                return raised([self.camera.project(cx + lx*ch - ly*sh, cy + lx*sh + ly*ch)], height)[0]
-            rib = tuple(min(255, c + 20) for c in roof)
-            for lx in np.arange(-length/2 + 0.6, length/2 - 0.45, 0.9):
-                pygame.draw.line(self.screen, rib, point(lx, -width*0.35), point(lx, width*0.35), 1)
-            # Pale edge rails and an amber fleet stripe read clearly at yard scale.
-            for side in [-1, 1]:
-                pygame.draw.line(self.screen, (182, 207, 213), point(-length/2 + 0.15, side*width*0.43), point(length/2 - 0.4, side*width*0.43), 1)
-            pygame.draw.line(self.screen, COLOR_CAB_ROOF, point(-length/2 + 0.25, width*0.29), point(length/2 - 0.5, width*0.29), max(1, round(self.camera.scale*0.11)))
-
-        # 2. Detailed 2D Wheels with Rims & Tires
-        def draw_detailed_wheel(center_x, center_y, heading):
-            tire_pts = get_poly(center_x, center_y, heading, 0.95, 0.35)
-            pygame.draw.polygon(self.screen, (20, 22, 28), tire_pts)
-            pygame.draw.polygon(self.screen, (10, 12, 16), tire_pts, 1)
-            rim_pts = get_poly(center_x, center_y, heading, 0.52, 0.16)
-            pygame.draw.polygon(self.screen, (175, 182, 192), rim_pts)
-            pygame.draw.polygon(self.screen, (80, 85, 95), rim_pts, 1)
-
-        # Tractor Drive Tandem
-        for rx_off in [0.0, -1.05]:
-            rx = x0 + rx_off * cos_t0
-            ry = y0 + rx_off * sin_t0
-            for side in [-dims.cab_width * 0.47, dims.cab_width * 0.47]:
-                draw_detailed_wheel(rx - side*sin_t0, ry + side*cos_t0, th0)
-
-        # Trailer 1 Wheels
-        for off in [-0.58, +0.58]:
-            ax_x = x1 + off * cos_t1
-            ax_y = y1 + off * sin_t1
-            for side in [-dims.trailer1_width * 0.47, dims.trailer1_width * 0.47]:
-                draw_detailed_wheel(ax_x - side*sin_t1, ax_y + side*cos_t1, th1)
-
-        # Trailer 2 Wheels
-        for off in [-0.58, +0.58]:
-            ax_x = x2 + off * cos_t2
-            ax_y = y2 + off * sin_t2
-            for side in [-dims.trailer2_width * 0.47, dims.trailer2_width * 0.47]:
-                draw_detailed_wheel(ax_x - side*sin_t2, ax_y + side*cos_t2, th2)
-
-        # 3. Tractor Rear Chassis Catwalk & Fifth-Wheel Turntable
-        catwalk_cx = x0 - 0.35 * cos_t0
-        catwalk_cy = y0 - 0.35 * sin_t0
-        catwalk_poly = get_poly(catwalk_cx, catwalk_cy, th0, 2.10, dims.cab_width * 0.68)
-        pygame.draw.polygon(self.screen, (34, 40, 50), catwalk_poly)
-        pygame.draw.polygon(self.screen, (60, 68, 80), catwalk_poly, 1)
-
-        # Catwalk diamond-plate tread lines
-        for off in [-0.8, -0.4, 0.0, 0.4, 0.8]:
-            p1 = self.camera.project(catwalk_cx + off*cos_t0 - (dims.cab_width*0.30)*sin_t0,
-                                     catwalk_cy + off*sin_t0 + (dims.cab_width*0.30)*cos_t0)
-            p2 = self.camera.project(catwalk_cx + off*cos_t0 + (dims.cab_width*0.30)*sin_t0,
-                                     catwalk_cy + off*sin_t0 - (dims.cab_width*0.30)*cos_t0)
-            pygame.draw.line(self.screen, (46, 54, 66), p1, p2, 1)
-
-        # Tractor Fifth-Wheel Turntable Base Plate directly over drive axle (x0, y0)
-        fw0_poly = get_poly(x0, y0, th0, 0.90, 0.82)
-        pygame.draw.polygon(self.screen, (20, 24, 30), fw0_poly)
-        pygame.draw.polygon(self.screen, (85, 92, 104), fw0_poly, 1)
-
-        # Horseshoe plate with rearward throat cutout
-        hp0 = self.camera.project(x0, y0)
-        pygame.draw.circle(self.screen, (38, 44, 54), hp0, 11)
-        pygame.draw.circle(self.screen, (190, 198, 210), hp0, 7)
-        th_e = self.camera.project(x0 - 0.32*cos_t0, y0 - 0.32*sin_t0)
-        pygame.draw.line(self.screen, (15, 18, 24), hp0, th_e, 4)
-
-        # ---------------------------------------------------------------------
-        # REFINED B-DOUBLE CHASSIS EXTENSION & INTER-TRAILER ARTICULATION
-        # ---------------------------------------------------------------------
-        t1_box_l = 5.20
-        t1_front_overhang = 0.75
-        t1_cx = x0 - (t1_box_l/2 - t1_front_overhang) * cos_t1
-        t1_cy = y0 - (t1_box_l/2 - t1_front_overhang) * sin_t1
-
-        # A. Trailer 1 Under-Nose Kingpin Skid Plate (resting on tractor fifth wheel)
-        t1_skid_cx = x0 + 0.15 * cos_t1
-        t1_skid_cy = y0 + 0.15 * sin_t1
-        t1_skid_poly = get_poly(t1_skid_cx, t1_skid_cy, th1, 1.05, dims.trailer1_width * 0.72)
-        pygame.draw.polygon(self.screen, (28, 34, 44), t1_skid_poly)
-        pygame.draw.polygon(self.screen, (85, 94, 106), t1_skid_poly, 1)
-
-        # B. Trailer 1 Extended Rear Chassis Frame & Treadplate Platform (extends behind box over axle)
-        deck_cx = x1 + 0.30 * cos_t1
-        deck_cy = y1 + 0.30 * sin_t1
-        deck_l = 2.40
-        deck_w = dims.trailer1_width * 0.78
-        deck_poly = get_poly(deck_cx, deck_cy, th1, deck_l, deck_w)
-        pygame.draw.polygon(self.screen, (32, 38, 48), deck_poly)
-        pygame.draw.polygon(self.screen, (60, 70, 85), deck_poly, 2)
-
-        # Steel cross-members / tread pattern lines across deck
-        for d_off in [-0.8, -0.4, 0.0, 0.4, 0.8]:
-            p1 = self.camera.project(deck_cx + d_off*cos_t1 - (deck_w/2 - 0.1)*sin_t1,
-                                     deck_cy + d_off*sin_t1 + (deck_w/2 - 0.1)*cos_t1)
-            p2 = self.camera.project(deck_cx + d_off*cos_t1 + (deck_w/2 - 0.1)*sin_t1,
-                                     deck_cy + d_off*sin_t1 - (deck_w/2 - 0.1)*cos_t1)
-            pygame.draw.line(self.screen, (45, 54, 66), p1, p2, 1)
-
-        # Tandem wheel mudguard fenders on Trailer 1 extension deck
-        for side in [-dims.trailer1_width * 0.46, dims.trailer1_width * 0.46]:
-            fender_poly = get_poly(x1 - side*sin_t1, y1 + side*cos_t1, th1, 2.10, 0.28)
-            pygame.draw.polygon(self.screen, (24, 28, 36), fender_poly)
-            pygame.draw.polygon(self.screen, (75, 82, 94), fender_poly, 1)
-
-        # C. Trailer 1 Fifth-Wheel Mounting Subframe & Turntable Base Plate
-        fw1_poly = get_poly(x1, y1, th1, 0.95, 0.85)
-        pygame.draw.polygon(self.screen, (18, 22, 28), fw1_poly)
-        pygame.draw.polygon(self.screen, (90, 98, 110), fw1_poly, 1)
-
-        # Fifth-wheel horseshoe plate with rear-facing throat cutout
-        hp1 = self.camera.project(x1, y1)
-        pygame.draw.circle(self.screen, (38, 44, 54), hp1, 11)
-        pygame.draw.circle(self.screen, (190, 198, 210), hp1, 7)
-        throat1_e = self.camera.project(x1 - 0.35*cos_t1, y1 - 0.35*sin_t1)
-        pygame.draw.line(self.screen, (15, 18, 24), hp1, throat1_e, 4)
-
-        # D. Trailer 1 Box with Chamfered Front Corners (matches reference!)
-        hw1 = dims.trailer1_width / 2.0
-        hl1 = t1_box_l / 2.0
-        chamfer1 = 0.35
-
-        t1_corners_local = [
-            (hl1 - chamfer1,  hw1),
-            (hl1,             hw1 - chamfer1),
-            (hl1,            -hw1 + chamfer1),
-            (hl1 - chamfer1, -hw1),
-            (-hl1,           -hw1),
-            (-hl1,            hw1)
-        ]
-        t1_pts = [self.camera.project(t1_cx + lx*cos_t1 - ly*sin_t1, t1_cy + lx*sin_t1 + ly*cos_t1) for lx, ly in t1_corners_local]
-        draw_raised_body(t1_pts, COLOR_T1_BEVEL, COLOR_T1_BEVEL, 0.48)
-
-        t1_inner_corners = [
-            (hl1 - chamfer1 - 0.08,  hw1 - 0.09),
-            (hl1 - 0.09,             hw1 - chamfer1 - 0.08),
-            (hl1 - 0.09,            -hw1 + chamfer1 + 0.08),
-            (hl1 - chamfer1 - 0.08, -hw1 + 0.09),
-            (-hl1 + 0.09,           -hw1 + 0.09),
-            (-hl1 + 0.09,            hw1 - 0.09)
-        ]
-        t1_inner_pts = [self.camera.project(t1_cx + lx*cos_t1 - ly*sin_t1, t1_cy + lx*sin_t1 + ly*cos_t1) for lx, ly in t1_inner_corners]
-        t1_inner_pts = raised(t1_inner_pts, 0.48)
-        pygame.draw.polygon(self.screen, COLOR_T1_ROOF, t1_inner_pts)
-        draw_roof_details(t1_cx, t1_cy, th1, t1_box_l, dims.trailer1_width, COLOR_T1_ROOF)
-
-        # Amber clearance lights on Trailer 1 front
-        for side in [-hw1 + 0.15, hw1 - 0.15]:
-            cl_p = self.camera.project(t1_cx + hl1*cos_t1 - side*sin_t1, t1_cy + hl1*sin_t1 + side*cos_t1)
-            cl_p = raised([cl_p], 0.48)[0]
-            pygame.draw.circle(self.screen, (255, 180, 40), cl_p, 2)
-
-        # Trailer 1 Rear Wall: Cargo Door frame line
-        t1_rear_l = self.camera.project(t1_cx - hl1*cos_t1 - hw1*sin_t1,
-                                        t1_cy - hl1*sin_t1 + hw1*cos_t1)
-        t1_rear_r = self.camera.project(t1_cx - hl1*cos_t1 + hw1*sin_t1,
-                                        t1_cy - hl1*sin_t1 - hw1*cos_t1)
-        start, end = raised([t1_rear_l, t1_rear_r], 0.48)
-        pygame.draw.line(self.screen, (174, 193, 207), start, end, 2)
-
-        # E. Trailer 2: Rear Semi-Trailer with Under-Nose Bolster & Aerodynamic Chamfered Corners
-        t2_l = 7.70
-        t2_front_overhang = 0.85
-        t2_cx = x2 + (dims.L2 + t2_front_overhang - t2_l/2) * cos_t2
-        t2_cy = y2 + (dims.L2 + t2_front_overhang - t2_l/2) * sin_t2
-
-        # Under-nose Kingpin Skid Plate (Dark circular bolster resting on fifth wheel)
-        skid_cx = x1 + 0.15 * cos_t2
-        skid_cy = y1 + 0.15 * sin_t2
-        skid_poly = get_poly(skid_cx, skid_cy, th2, 1.10, dims.trailer2_width * 0.72)
-        pygame.draw.polygon(self.screen, (28, 34, 44), skid_poly)
-        pygame.draw.polygon(self.screen, (85, 94, 106), skid_poly, 1)
-
-        # Trailer 2 Body with Chamfered Front Aerodynamic Corners (Zero awkward polygon clipping)
-        hw2 = dims.trailer2_width / 2.0
-        hl2 = t2_l / 2.0
-        ch2, sh2 = cos_t2, sin_t2
-        chamfer2 = 0.35
-
-        t2_corners_local = [
-            (hl2 - chamfer2,  hw2),
-            (hl2,             hw2 - chamfer2),
-            (hl2,            -hw2 + chamfer2),
-            (hl2 - chamfer2, -hw2),
-            (-hl2,           -hw2),
-            (-hl2,            hw2)
-        ]
-        t2_pts = [self.camera.project(t2_cx + lx*ch2 - ly*sh2, t2_cy + lx*sh2 + ly*ch2) for lx, ly in t2_corners_local]
-        draw_raised_body(t2_pts, COLOR_T2_BEVEL, COLOR_T2_BEVEL, 0.48)
-
-        t2_inner_corners = [
-            (hl2 - chamfer2 - 0.08,  hw2 - 0.09),
-            (hl2 - 0.09,             hw2 - chamfer2 - 0.08),
-            (hl2 - 0.09,            -hw2 + chamfer2 + 0.08),
-            (hl2 - chamfer2 - 0.08, -hw2 + 0.09),
-            (-hl2 + 0.09,           -hw2 + 0.09),
-            (-hl2 + 0.09,            hw2 - 0.09)
-        ]
-        t2_inner_pts = [self.camera.project(t2_cx + lx*ch2 - ly*sh2, t2_cy + lx*sh2 + ly*ch2) for lx, ly in t2_inner_corners]
-        t2_inner_pts = raised(t2_inner_pts, 0.48)
-        pygame.draw.polygon(self.screen, COLOR_T2_ROOF, t2_inner_pts)
-        draw_roof_details(t2_cx, t2_cy, th2, t2_l, dims.trailer2_width, COLOR_T2_ROOF)
-
-        # Front Bulkhead Amber Clearance Lights on Trailer 2
-        for side in [-hw2 + 0.15, hw2 - 0.15]:
-            cl_p = self.camera.project(t2_cx + hl2*ch2 - side*sh2, t2_cy + hl2*sh2 + side*ch2)
-            cl_p = raised([cl_p], 0.48)[0]
-            pygame.draw.circle(self.screen, (255, 180, 40), cl_p, 2)
-
-        # Rear Cargo Doors: Split line and vertical lock rods
-        t2_rear_s = self.camera.project(t2_cx - hl2*cos_t2, t2_cy - hl2*sin_t2)
-        t2_rear_e = self.camera.project(t2_cx - (hl2 - 0.35)*cos_t2, t2_cy - (hl2 - 0.35)*sin_t2)
-        start, end = raised([t2_rear_s, t2_rear_e], 0.48)
-        pygame.draw.line(self.screen, (174, 202, 195), start, end, 2)
-
-        # Rear Bumper Bar & Taillights
-        t2_bmp_poly = get_poly(t2_cx - (hl2 + 0.08)*cos_t2, t2_cy - (hl2 + 0.08)*sin_t2, th2, 0.16, dims.trailer2_width - 0.08)
-        pygame.draw.polygon(self.screen, (40, 44, 52), t2_bmp_poly)
-        for point in self.lighting.taillights(self.state, dims, (x2, y2, th2)):
-            self.lighting.draw_lens(self.screen, self.camera, point, th2, (230, 40, 49), height=0.08)
-        for side in [-dims.trailer2_width * 0.27, dims.trailer2_width * 0.27]:
-            offset = dims.L2 + 0.85 - 7.7 - 0.08
-            point = (x2 + offset*cos_t2 - side*sin_t2, y2 + offset*sin_t2 + side*cos_t2)
-            color = (225, 235, 213) if self.current_speed < -0.1 else (50, 59, 63)
-            self.lighting.draw_lens(self.screen, self.camera, point, th2, color, height=0.08)
-
-        # ---------------------------------------------------------------------
-        # G. Warm amber tractor, with a raised sleeper roof above the lower hood.
-        # ---------------------------------------------------------------------
-        cab_cx = x0 + 1.80 * cos_t0
-        cab_cy = y0 + 1.80 * sin_t0
-
-        # 1. Fuel Tanks & Chassis Skirts flanking chassis
-        for side in [-dims.cab_width * 0.48, dims.cab_width * 0.48]:
-            ft_cx = x0 + 1.35 * cos_t0 - side * sin_t0
-            ft_cy = y0 + 1.35 * sin_t0 + side * cos_t0
-            ft_poly = get_poly(ft_cx, ft_cy, th0, 1.65, 0.38)
-            pygame.draw.polygon(self.screen, (220, 155, 36), ft_poly)
-            pygame.draw.polygon(self.screen, (175, 120, 24), ft_poly, 1)
-
-        # 2. Rear Cab Side Fairing Extenders / Collar (Wings that reach back towards trailer)
-        for side in [-dims.cab_width * 0.44, dims.cab_width * 0.44]:
-            wing_cx = x0 + 0.65 * cos_t0 - side * sin_t0
-            wing_cy = y0 + 0.65 * sin_t0 + side * cos_t0
-            wing_poly = get_poly(wing_cx, wing_cy, th0, 0.45, 0.22)
-            pygame.draw.polygon(self.screen, (238, 168, 42), wing_poly)
-            pygame.draw.polygon(self.screen, (185, 128, 28), wing_poly, 1)
-
-        # 3. Main Sleeper Cabin Roof (Sculpted aerodynamic yellow body)
-        cab_poly = get_poly(cab_cx, cab_cy, th0, 1.95, dims.cab_width)
-        draw_raised_body(cab_poly, COLOR_CAB_ROOF, (147, 87, 26), 0.32)
-
-        # Aerodynamic Roof Contours (The raised center ridge & side flow ridges from reference)
-        r_center_poly = get_poly(cab_cx - 0.10 * cos_t0, cab_cy - 0.10 * sin_t0, th0, 1.35, dims.cab_width * 0.36)
-        r_center_poly = raised(r_center_poly, 0.32)
-        pygame.draw.polygon(self.screen, (255, 195, 80), r_center_poly)
-        pygame.draw.polygon(self.screen, (225, 155, 38), r_center_poly, 1)
-
-        # Side roof flow lines
-        for r_side in [-dims.cab_width * 0.32, dims.cab_width * 0.32]:
-            p_s = self.camera.project(cab_cx + 0.80 * cos_t0 - r_side * sin_t0, cab_cy + 0.80 * sin_t0 + r_side * cos_t0)
-            p_e = self.camera.project(cab_cx - 0.80 * cos_t0 - r_side * sin_t0, cab_cy - 0.80 * sin_t0 + r_side * cos_t0)
-            start, end = raised([p_s, p_e], 0.32)
-            pygame.draw.line(self.screen, COLOR_CAB_BEVEL, start, end, 1)
-
-        # 4. Panoramic Curved Front Windshield & Wipers
-        ws_cx = x0 + 2.72 * cos_t0
-        ws_cy = y0 + 2.72 * sin_t0
-        ws_hw = (dims.cab_width - 0.20) / 2.0
-        ws_poly = [
-            self.camera.project(ws_cx + 0.20*cos_t0 - (ws_hw - 0.15)*sin_t0, ws_cy + 0.20*sin_t0 + (ws_hw - 0.15)*cos_t0),
-            self.camera.project(ws_cx - 0.16*cos_t0 - ws_hw*sin_t0, ws_cy - 0.16*sin_t0 + ws_hw*cos_t0),
-            self.camera.project(ws_cx - 0.16*cos_t0 + ws_hw*sin_t0, ws_cy - 0.16*sin_t0 - ws_hw*cos_t0),
-            self.camera.project(ws_cx + 0.20*cos_t0 + (ws_hw - 0.15)*sin_t0, ws_cy + 0.20*sin_t0 - (ws_hw - 0.15)*cos_t0)
-        ]
-        ws_poly = raised(ws_poly, 0.32)
-        pygame.draw.polygon(self.screen, (38, 65, 82), ws_poly)
-        pygame.draw.polygon(self.screen, (14, 18, 26), ws_poly, 1)
-
-        # Dual Windshield Wipers parked at bottom edge
-        for w_side in [-0.42, 0.42]:
-            wp_s = self.camera.project(ws_cx - 0.12*cos_t0 - w_side*sin_t0, ws_cy - 0.12*sin_t0 + w_side*cos_t0)
-            wp_e = self.camera.project(ws_cx + 0.12*cos_t0 - (w_side + 0.25)*sin_t0, ws_cy + 0.12*sin_t0 + (w_side + 0.25)*cos_t0)
-            start, end = raised([wp_s, wp_e], 0.32)
-            pygame.draw.line(self.screen, (10, 12, 16), start, end, 1)
-
-        # 5. Aerodynamic Tapered Front Hood
-        hood_cx = x0 + 3.65 * cos_t0
-        hood_cy = y0 + 3.65 * sin_t0
-        hood_l = 1.70
-        hood_w_rear = dims.cab_width * 0.90
-        hood_w_front = dims.cab_width * 0.72
-
-        h_rear_l = (hood_cx - (hood_l/2)*cos_t0 - (hood_w_rear/2)*sin_t0, hood_cy - (hood_l/2)*sin_t0 + (hood_w_rear/2)*cos_t0)
-        h_rear_r = (hood_cx - (hood_l/2)*cos_t0 + (hood_w_rear/2)*sin_t0, hood_cy - (hood_l/2)*sin_t0 - (hood_w_rear/2)*cos_t0)
-        h_front_l = (hood_cx + (hood_l/2)*cos_t0 - (hood_w_front/2)*sin_t0, hood_cy + (hood_l/2)*sin_t0 + (hood_w_front/2)*cos_t0)
-        h_front_r = (hood_cx + (hood_l/2)*cos_t0 + (hood_w_front/2)*sin_t0, hood_cy + (hood_l/2)*sin_t0 - (hood_w_front/2)*cos_t0)
-
-        hood_poly = [self.camera.project(*h_rear_l), self.camera.project(*h_rear_r),
-                     self.camera.project(*h_front_r), self.camera.project(*h_front_l)]
-        draw_raised_body(hood_poly, COLOR_CAB_HOOD, (147, 87, 26), 0.14)
-
-        # Hood Center Crease Line
-        hc_s = self.camera.project(hood_cx - 0.75 * cos_t0, hood_cy - 0.75 * sin_t0)
-        hc_e = self.camera.project(hood_cx + 0.80 * cos_t0, hood_cy + 0.80 * sin_t0)
-        pygame.draw.line(self.screen, (255, 202, 95), hc_s, hc_e, 2)
-
-        # Hood Curved Fender Ridges (dual flowing crease lines leading to headlights)
-        for f_side in [-0.68, 0.68]:
-            f_s = self.camera.project(hood_cx - 0.75 * cos_t0 - (f_side * 1.15) * sin_t0, hood_cy - 0.75 * sin_t0 + (f_side * 1.15) * cos_t0)
-            f_m = self.camera.project(hood_cx + 0.10 * cos_t0 - (f_side * 1.05) * sin_t0, hood_cy + 0.10 * sin_t0 + (f_side * 1.05) * cos_t0)
-            f_e = self.camera.project(hood_cx + 0.78 * cos_t0 - (f_side * 0.85) * sin_t0, hood_cy + 0.78 * sin_t0 + (f_side * 0.85) * cos_t0)
-            pygame.draw.lines(self.screen, (215, 148, 35), False, [f_s, f_m, f_e], 2)
-
-        # 7. Chrome Front Grille Inset at Nose
-        grille_cx = hood_cx + 0.88 * cos_t0
-        grille_cy = hood_cy + 0.88 * sin_t0
-        grille_poly = get_poly(grille_cx, grille_cy, th0, 0.15, hood_w_front * 0.65)
-        pygame.draw.polygon(self.screen, (50, 55, 65), grille_poly)
-        pygame.draw.polygon(self.screen, (225, 230, 240), grille_poly, 1)
-
-        # 8. Front Curved Aerodynamic Bumper
-        bumper_cx = hood_cx + 0.94 * cos_t0
-        bumper_cy = hood_cy + 0.94 * sin_t0
-        bumper_poly = get_poly(bumper_cx, bumper_cy, th0, 0.16, hood_w_front * 0.96)
-        pygame.draw.polygon(self.screen, (235, 168, 42), bumper_poly)
-        pygame.draw.polygon(self.screen, (185, 128, 28), bumper_poly, 1)
-
-        # 9. Aerodynamic Side Mirrors (Extending from A-pillars, yellow brackets, mirror glass)
-        for side in [-dims.cab_width * 0.54, dims.cab_width * 0.54]:
-            arm_start = self.camera.project(x0 + 2.70 * cos_t0 - (side * 0.82) * sin_t0,
-                                            y0 + 2.70 * sin_t0 + (side * 0.82) * cos_t0)
-            arm_end   = self.camera.project(x0 + 2.64 * cos_t0 - (side * 1.18) * sin_t0,
-                                            y0 + 2.64 * sin_t0 + (side * 1.18) * cos_t0)
-            pygame.draw.line(self.screen, (225, 155, 36), arm_start, arm_end, 2)
-
-            m_poly = get_poly(x0 + 2.64 * cos_t0 - (side * 1.18) * sin_t0,
-                              y0 + 2.64 * sin_t0 + (side * 1.18) * cos_t0,
-                              th0, 0.42, 0.16)
-            pygame.draw.polygon(self.screen, (248, 178, 48), m_poly)
-            pygame.draw.polygon(self.screen, (185, 128, 28), m_poly, 1)
-
-        # 10. Front Steer Wheels
-        steer_th = th0 + self.state.phi
-        fx = x0 + dims.L0 * cos_t0
-        fy = y0 + dims.L0 * sin_t0
-
-        for side in [-dims.cab_width * 0.52, dims.cab_width * 0.52]:
-            wx = fx - side * sin_t0
-            wy = fy + side * cos_t0
-            draw_detailed_wheel(wx, wy, steer_th)
-
-
-        # Lens housings sit above the fenders and lower bumper, matching the
-        # ground-light emitter positions rather than floating ahead of the cab.
-        for point in self.lighting.headlights(self.state, dims):
-            self.lighting.draw_lens(self.screen, self.camera, point, th0, (250, 242, 218), height=0.14)
+        VehicleRenderer().draw(self.screen, self.camera, self.state, self.dims, self.kinematics)
 
     # ==========================================================================
     # THEMATIC FROSTED GLASS HUD WITH REFINED DISTRIBUTION PLOT
@@ -1207,7 +786,7 @@ class JackknifeGame25D:
 
         if self.is_drawing and len(self.drawing_points) > 1:
             pts = [self.camera.project(p[0], p[1]) for p in self.drawing_points]
-            pygame.draw.lines(self.screen, COLOR_ACCENT_CYAN, False, pts, 2)
+            pygame.draw.lines(self.screen, AMBER, False, pts, 2)
 
         # 2. Clear and populate single unified dynamic alpha layer (Zero 4K allocation)
         if not self.drawing_mode:
@@ -1220,6 +799,7 @@ class JackknifeGame25D:
             self.screen.blit(self.dynamic_alpha_surf, (0, 0))
             self.draw_dynamic_finish_line_core()
             self.draw_truck_and_trailers()
+            self.snowfall.draw(self.screen, self.camera.viewport)
         self.screen.set_clip(None)
         self.draw_hud()
         pygame.display.flip()

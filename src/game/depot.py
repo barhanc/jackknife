@@ -5,6 +5,8 @@ import math
 import numpy as np
 import pygame
 
+from .snow import SnowCover
+
 ROAD_PAINT = (222, 228, 226)
 WORN_PAINT = (179, 188, 186)
 
@@ -55,6 +57,7 @@ class DepotTerrain:
         self.grain = [(float(rng.uniform(-yard_w/2, yard_w/2)), float(rng.uniform(-yard_h/2, yard_h/2)), int(rng.integers(27, 46))) for _ in range(1500)]
         self.patches = [(float(rng.uniform(-73, 73)), float(rng.uniform(-44, 44)), float(rng.uniform(2, 6)), float(rng.uniform(1, 3)), float(rng.uniform(-.2, .2))) for _ in range(28)]
         self.stains = [(float(rng.uniform(-72, 72)), float(rng.uniform(-42, 42)), float(rng.uniform(.3, 1.1))) for _ in range(24)]
+        self.snow = SnowCover(yard_w,yard_h,seed+91)
 
     def invalidate(self):
         self.path = None
@@ -172,6 +175,8 @@ class DepotTerrain:
         for x,y,radius in self.stains:
             p = camera.project(x,y)
             pygame.draw.circle(surface,(26,30,34),p,max(1,round(radius*camera.scale)))
+        if not editing:
+            self.snow.draw(surface,camera)
         for y in (-self.yard_h/2+3, self.yard_h/2-3):
             left,right=camera.project(-self.yard_w/2+5,y),camera.project(self.yard_w/2-5,y)
             pygame.draw.line(surface,(18,23,28),left,right,max(2,round(camera.scale*.35)))
@@ -179,10 +184,7 @@ class DepotTerrain:
                 pygame.draw.line(surface,(52,57,59),camera.project(x,y-.16),camera.project(x,y+.16),1)
         perimeter = box_points(0,0,self.yard_w,self.yard_h)
         self._polygon(surface,camera,perimeter,(75,82,83),max(2,round(camera.scale*.45)))
-        self._polygon(surface,camera,box_points(0,0,self.yard_w-2,self.yard_h-2),(128,119,75),1)
-        for x in np.arange(-self.yard_w/2+2,self.yard_w/2,3):
-            for y in (-self.yard_h/2+1,self.yard_h/2-1):
-                self._polygon(surface,camera,box_points(x,y,1.3,.7),(170,139,67))
+        self._polygon(surface,camera,box_points(0,0,self.yard_w-2,self.yard_h-2),(53,63,68),1)
         for y in np.arange(-self.yard_h/2+2,self.yard_h/2,8):
             for x in (-self.yard_w/2,self.yard_w/2):
                 pygame.draw.circle(surface,(97,105,106),camera.project(x,y),max(1,round(camera.scale*.2)))

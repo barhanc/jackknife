@@ -10,6 +10,7 @@ import pygame
 import numpy as np
 
 from src.game import JackknifeGame25D
+from src.game.hud import TEXT, MUTED, KEYCAP
 
 
 class GameHUDTests(unittest.TestCase):
@@ -95,8 +96,14 @@ class GameHUDTests(unittest.TestCase):
         self.assertGreater(g.hud.manual_steering_bar_rect.w, 0)
         self.send(pygame.KEYDOWN, key=pygame.K_m)
         self.assertEqual(g.mode, "AUTONOMOUS")
+        self.assertEqual(g.time_multiplier, 16)
         g.render()
         self.assertGreater(g.hud.histogram_plot_rect.w, 0)
+        self.send(pygame.KEYDOWN, key=pygame.K_m)
+        g.time_multiplier = 2
+        self.send(pygame.MOUSEBUTTONDOWN, button=1, pos=g.hud.button_rects["mode"].center)
+        self.assertEqual(g.mode, "AUTONOMOUS")
+        self.assertEqual(g.time_multiplier, 16)
 
     def test_attention_rays_have_an_independent_toggle(self):
         g = self.game
@@ -116,9 +123,9 @@ class GameHUDTests(unittest.TestCase):
         for label,key in [("AUTO","M"),("NEW ROUTE","P"),("CONTINUE","Space"),("RETRY","R")]:
             g.screen.fill((0,0,0))
             g.hud._button(rect,label,key)
-            mask = pygame.mask.from_threshold(g.screen,(242,235,213),(1,1,1,255))
-            mask.draw(pygame.mask.from_threshold(g.screen,(159,151,178),(1,1,1,255)),(0,0))
-            mask.draw(pygame.mask.from_threshold(g.screen,(9,9,17),(1,1,1,255)),(0,0))
+            mask = pygame.mask.from_threshold(g.screen,TEXT,(1,1,1,255))
+            mask.draw(pygame.mask.from_threshold(g.screen,MUTED,(1,1,1,255)),(0,0))
+            mask.draw(pygame.mask.from_threshold(g.screen,KEYCAP,(1,1,1,255)),(0,0))
             components = cast(list[pygame.Rect], mask.get_bounding_rects())
             self.assertTrue(components)
             ink = components[0].unionall(components[1:])

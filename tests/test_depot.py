@@ -7,6 +7,7 @@ import pygame
 
 from src.game import JackknifeGame25D
 from src.game.depot import DepotTerrain
+from src.game.snow import SnowCover
 from src.path_generator import Path
 
 
@@ -99,6 +100,21 @@ class DepotTerrainTests(unittest.TestCase):
                 for _ in range(3):
                     g.render()
         self.assertIs(g.background_surf,background)
+
+    def test_snow_is_reproducible_and_survives_route_changes(self):
+        g = self.game
+        snow = g.terrain.snow
+        expected = SnowCover(g.camera.yard_w,g.camera.yard_h,g.terrain.seed+91)
+        np.testing.assert_array_equal(snow.coverage,expected.coverage)
+        first = pygame.Surface(g.screen.get_size(),depth=32)
+        first.fill((0,0,0))
+        snow.draw(first,g.camera)
+        g.path = self.route_examples()[0]
+        g.generate_procedural_yard()
+        second = pygame.Surface(g.screen.get_size(),depth=32)
+        second.fill((0,0,0))
+        g.terrain.snow.draw(second,g.camera)
+        self.assertEqual(pygame.image.tobytes(first,'RGB'),pygame.image.tobytes(second,'RGB'))
 
 
 if __name__ == '__main__':

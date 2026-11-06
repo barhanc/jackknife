@@ -37,17 +37,19 @@ class TruckLighting:
         return image
 
     def _beam(self, scale, length, strength, red_mix=0.0):
-        margin = .8
+        margin = 1.5
         width = max(4,round((length+2*margin)*scale))
-        height = max(4,round((length*.8+2)*scale))
+        height = max(4,round((length*1.2+2)*scale))
         yy,xx = np.mgrid[:height,:width]
         origin = (round(margin*scale),height//2)
         x,y = (xx-origin[0])/scale,(yy-origin[1])/scale
         distance = np.maximum(x,0)
-        spread = .28+.33*distance
-        outer = np.exp(-1.8*(y/spread)**2)
-        core = np.exp(-1.8*(y/(.16+.13*distance))**2)
-        forward = 1/(1+np.exp(-np.clip(x*10,-40,40)))
+        # Broad elliptical light pools avoid the straight sides and sharp point
+        # of a widening cone. Both lobes fade smoothly around their shoulders.
+        longitudinal = np.exp(-((x-length*.27)/(length*.65))**2)
+        outer = longitudinal*np.exp(-1.8*(y/(.55+length*.25))**2)
+        core = np.exp(-((x-length*.18)/(length*.45))**2-1.8*(y/(.38+length*.08))**2)
+        forward = 1/(1+np.exp(-np.clip(x*3,-40,40)))
         cutoff = np.clip((length-x)/2,0,1)**2
         intensity = (.7*outer+.3*core)*np.exp(-distance/6)*forward*cutoff
         alpha = np.clip(strength*intensity,0,255)
@@ -74,8 +76,8 @@ class TruckLighting:
         self._sprites = {
             'head': self._beam(scale,13.5,72),
             'reverse': self._beam(scale,6.5,40,red_mix=.22),
-            'white': self._halo(scale,(255,239,199),1.3,65),
-            'red': self._halo(scale,(255,48,58),1.25,75),
+            'white': self._halo(scale,(255,239,199),1.65,65),
+            'red': self._halo(scale,(255,48,58),1.6,75),
         }
 
     @staticmethod

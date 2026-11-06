@@ -5,12 +5,12 @@ import numpy as np
 import pygame
 
 
-PANEL = (15, 13, 25)
-BORDER = (65, 53, 87)
-TEXT = (242, 235, 213)
-MUTED = (159, 151, 178)
+PANEL = (21, 22, 23)
+BORDER = (72, 73, 72)
+TEXT = (233, 233, 226)
+MUTED = (161, 164, 161)
 AMBER = (255, 190, 73)
-CYAN = (82, 220, 225)
+KEYCAP = (12, 13, 14)
 GREEN = (135, 225, 130)
 RED = (255, 85, 112)
 
@@ -115,22 +115,22 @@ class GameHUD:
         screen = self.game.screen
         pygame.draw.rect(screen, PANEL, rect)
         for y in range(rect.top+2, rect.bottom, max(4, int(4*self.game.ui_scale))):
-            pygame.draw.line(screen, (19, 16, 31), (rect.left, y), (rect.right-1, y))
+            pygame.draw.line(screen, (25, 26, 27), (rect.left, y), (rect.right-1, y))
 
     def _button(self, rect, label, key="", active=False, primary=False):
         screen = self.game.screen
         hover = rect.collidepoint(pygame.mouse.get_pos())
-        fill = (58, 38, 23) if primary else ((39, 30, 57) if hover or active else (22, 18, 35))
+        fill = (49, 43, 31) if primary else ((47, 49, 49) if hover or active else (29, 30, 31))
         pygame.draw.polygon(screen, fill, self._corners(rect))
-        pygame.draw.polygon(screen, AMBER if primary else CYAN if hover or active else BORDER, self._corners(rect), 1)
-        pygame.draw.line(screen, (91, 60, 37) if primary else (47, 38, 63), (rect.left+5,rect.bottom-3), (rect.right-6,rect.bottom-3))
+        pygame.draw.polygon(screen, AMBER if primary else AMBER if hover or active else BORDER, self._corners(rect), 1)
+        pygame.draw.line(screen, (104, 83, 45) if primary else (58, 60, 60), (rect.left+5,rect.bottom-3), (rect.right-6,rect.bottom-3))
         if key:
             key_w = self.game.font_sm.size(key)[0] + self.gap
             label_w = self._glyph(label, self.game.font_arcade, TEXT).get_width()
             group_w = label_w+self.gap+key_w
             group_left = rect.centerx-group_w//2
             key_rect = pygame.Rect(group_left+label_w+self.gap, rect.centery-int(10*self.game.ui_scale), key_w, int(20*self.game.ui_scale))
-            pygame.draw.rect(screen, (9, 9, 17), key_rect)
+            pygame.draw.rect(screen, KEYCAP, key_rect)
             self._text(key, key_rect, self.game.font_sm, MUTED, True)
             text_rect = pygame.Rect(group_left, rect.top, label_w, rect.h)
         else:
@@ -186,7 +186,7 @@ class GameHUD:
     def draw(self):
         g = self.game
         self._panel(self.toolbar_rect)
-        pygame.draw.line(g.screen, CYAN, self.toolbar_rect.bottomleft, self.toolbar_rect.bottomright, 2)
+        pygame.draw.line(g.screen, BORDER, self.toolbar_rect.bottomleft, self.toolbar_rect.bottomright, 2)
         if g.drawing_mode:
             self._text("DRAW ROUTE", pygame.Rect(self.pad, self.pad, max(1, self.cancel_rect.left-2*self.pad), self.row_h), g.font_arcade, AMBER)
             hint = "Drag · Release to finish · Esc cancel"
@@ -194,7 +194,7 @@ class GameHUD:
             self._button(self.cancel_rect, "CANCEL", primary=True)
         else:
             title = self.brand_rect.copy(); title.height = int(25*g.ui_scale)
-            self._text("JACKKNIFE", title.move(1, 2), g.font_arcade_title, (94, 46, 56))
+            self._text("JACKKNIFE", title.move(1, 2), g.font_arcade_title, (87, 67, 35))
             self._text("JACKKNIFE", title, g.font_arcade_title, AMBER)
             self._text("B-DOUBLE // REVERSE", pygame.Rect(title.x, title.bottom, self.brand_rect.w, int(15*g.ui_scale)), g.font_sm, MUTED)
             for name, label, key in [
@@ -214,18 +214,16 @@ class GameHUD:
     def _draw_status(self):
         g = self.game
         self._panel(self.status_rect)
-        pygame.draw.line(g.screen, CYAN, self.status_rect.topleft, self.status_rect.topright, 2)
+        pygame.draw.line(g.screen, BORDER, self.status_rect.topleft, self.status_rect.topright, 2)
         color = AMBER
         if g.drawing_mode:
             status = "DRAW ROUTE"
         elif g.kinematics.is_jackknifed(g.state):
             status, color = "JACKKNIFED", RED
-        elif g.is_off_track:
-            status, color = "OFF TRACK", RED
         elif g.has_arrived:
             status, color = "COMPLETE", GREEN
         elif g.is_paused:
-            status, color = "PAUSED", CYAN
+            status, color = "PAUSED", AMBER
         else:
             status = "AUTONOMOUS" if g.mode == "AUTONOMOUS" else "MANUAL"
         self._text(status, self.status_cells[0], g.font_arcade, color)
@@ -239,12 +237,12 @@ class GameHUD:
             left = bar.x+round(i*bar.w/14)
             right = bar.x+round((i+1)*bar.w/14)-max(1, int(2*g.ui_scale))
             segment = pygame.Rect(left, bar.y, max(1, right-left), bar.h)
-            color = (GREEN if rho > .45 else AMBER if rho > .2 else RED) if i/14 < rho else (42, 33, 56)
+            color = (GREEN if rho > .45 else AMBER if rho > .2 else RED) if i/14 < rho else (53, 56, 56)
             pygame.draw.rect(g.screen, color, segment)
         rect = self.status_cells[2]
         label_w = g.font_arcade_small.size("INFERENCE")[0]
         self._text("INFERENCE", pygame.Rect(rect.x, rect.y, label_w, rect.h), g.font_arcade_small, MUTED)
-        self._text(f"{g.inference_time_ms:.1f} ms", pygame.Rect(rect.x+label_w+self.gap, rect.y, rect.w-label_w-self.gap, rect.h), g.font_mono, CYAN)
+        self._text(f"{g.inference_time_ms:.1f} ms", pygame.Rect(rect.x+label_w+self.gap, rect.y, rect.w-label_w-self.gap, rect.h), g.font_mono, AMBER)
         self._button(self.reset_rect, "RESET", "R")
 
     def _alert_state(self):
@@ -254,11 +252,11 @@ class GameHUD:
         if g.kinematics.is_jackknifed(g.state):
             return "JACKKNIFED", "HITCH LIMIT REACHED", RED
         if g.is_off_track:
-            return "OFF TRACK", f"DEVIATION {g.cross_track_err:.1f} m // LIMIT 5.5 m", RED
+            return "OFF TRACK", "RETRY OR DRAW A WIDER ROUTE", RED
         if g.has_arrived:
             return "DOCK SECURED", "DELIVERY COMPLETE", GREEN
         if g.is_paused:
-            return "PAUSED", "SPACE TO CONTINUE", CYAN
+            return "PAUSED", "SPACE TO CONTINUE", AMBER
         return None
 
     def _draw_alert(self):
@@ -277,7 +275,7 @@ class GameHUD:
         rect = pygame.Rect(0, 0, max(1,width), max(1,height))
         rect.center = view.center
         self.alert_rect = rect
-        pygame.draw.polygon(g.screen, (4, 5, 12), self._corners(rect.move(4, 5), 8))
+        pygame.draw.polygon(g.screen, (8, 9, 10), self._corners(rect.move(4, 5), 8))
         pygame.draw.polygon(g.screen, PANEL, self._corners(rect, 8))
         pygame.draw.polygon(g.screen, accent, self._corners(rect, 8), 2)
         font = g.font_arcade_alert
@@ -287,7 +285,7 @@ class GameHUD:
             font = g.font_arcade
         compact = rect.h < int(156*g.ui_scale)
         title_rect = pygame.Rect(rect.x+self.pad, rect.y+int((12 if compact else 24)*g.ui_scale), rect.w-2*self.pad, int(34*g.ui_scale))
-        self._text(title, title_rect.move(2, 2), font, (70, 26, 48), True)
+        self._text(title, title_rect.move(2, 2), font, (65, 53, 32), True)
         self._text(title, title_rect, font, accent, True)
         if not compact:
             self._text(subtitle, pygame.Rect(rect.x+self.pad, title_rect.bottom+int(8*g.ui_scale), rect.w-2*self.pad, int(22*g.ui_scale)), g.font_mono, TEXT, True)
@@ -366,7 +364,7 @@ class GameHUD:
                 x0 = plot.x+round(i*plot.w/15)
                 x1 = plot.x+round((i+1)*plot.w/15)-2
                 height = max(2, round(probability/maximum*plot.h))
-                pygame.draw.rect(g.screen, CYAN if i == int(np.argmax(g.action_probs)) else (61, 47, 88), (x0, plot.bottom-height, max(1, x1-x0), height))
+                pygame.draw.rect(g.screen, AMBER if i == int(np.argmax(g.action_probs)) else (72, 77, 77), (x0, plot.bottom-height, max(1, x1-x0), height))
             needle_x = round(self.steering_bin_x(angle, plot))
             self.expected_steering_x = needle_x
             line_width = max(1, 2*round(g.ui_scale)-1)
@@ -378,11 +376,11 @@ class GameHUD:
             self.histogram_plot_rect = pygame.Rect(0, 0, 0, 0)
             bar = pygame.Rect(plot.x, plot.centery-int(6*g.ui_scale), plot.w, int(12*g.ui_scale))
             self.manual_steering_bar_rect = bar
-            pygame.draw.rect(g.screen, (42, 33, 56), bar)
+            pygame.draw.rect(g.screen, (53, 56, 56), bar)
             cursor = round(plot.left+(max(-35,min(35,angle))+35)/70*plot.w)
             self.manual_steering_cursor_x = cursor
             middle = plot.centerx
-            pygame.draw.rect(g.screen, CYAN, (min(middle,cursor),bar.y,max(1,abs(cursor-middle)),bar.h))
+            pygame.draw.rect(g.screen, AMBER, (min(middle,cursor),bar.y,max(1,abs(cursor-middle)),bar.h))
             pygame.draw.line(g.screen, TEXT, (middle,bar.y-4),(middle,bar.bottom+4))
             pygame.draw.line(g.screen, AMBER, (cursor,bar.y-5),(cursor,bar.bottom+5),2)
             self._steering_axis(plot, histogram=False)
