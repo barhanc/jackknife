@@ -203,7 +203,7 @@ class JackknifeGame25D:
         self._inference_stats_time = 0.0
         self.attention_weights = np.ones(64) / 64.0
         self.action_probs = np.ones(15) / 15.0
-        self.show_help = False
+        self.show_help = True
         self.show_rays = False
         self.frame_count = 0
         self.hud = GameHUD(self)

@@ -1,5 +1,6 @@
 """Reserved screen chrome for the simulation; the yard never sits underneath it."""
 import math
+import time
 
 import numpy as np
 import pygame
@@ -18,6 +19,8 @@ RED = (255, 85, 112)
 class GameHUD:
     def __init__(self, game):
         self.game = game
+        self.display_probs = None
+        self.histogram_time = 0.0
         self.diagnostics_scroll = 0
         self.scroll_limit = 0
         self.alert_rect = pygame.Rect(0, 0, 0, 0)
@@ -312,6 +315,14 @@ class GameHUD:
 
     def _draw_diagnostics(self):
         g = self.game
+        now = time.perf_counter()
+        if self.display_probs is None or not g.inference_time_ms:
+            self.display_probs = np.array(g.action_probs, dtype=float)
+        else:
+            weight = 1.0-math.exp(-(now-self.histogram_time)/.12)
+            self.display_probs += weight*(g.action_probs-self.display_probs)
+        self.histogram_time = now
+        probabilities = self.display_probs
         area = self.drawer_rect
         self._panel(area)
         pygame.draw.rect(g.screen, BORDER, area, 1)
@@ -357,14 +368,14 @@ class GameHUD:
         self.expected_steering_x = None
         self.manual_steering_bar_rect = pygame.Rect(0, 0, 0, 0)
         if g.mode == "AUTONOMOUS" or g.ai_save_active:
-            angle = float(np.dot(g.action_probs, np.linspace(-35, 35, 15)))
+            angle = float(np.dot(probabilities, np.linspace(-35, 35, 15)))
             self.histogram_plot_rect = plot.copy()
-            maximum = max(.2, float(np.max(g.action_probs)))
-            for i, probability in enumerate(g.action_probs):
+            maximum = max(.2, float(np.max(probabilities)))
+            for i, probability in enumerate(probabilities):
                 x0 = plot.x+round(i*plot.w/15)
                 x1 = plot.x+round((i+1)*plot.w/15)-2
                 height = max(2, round(probability/maximum*plot.h))
-                pygame.draw.rect(g.screen, AMBER if i == int(np.argmax(g.action_probs)) else (72, 77, 77), (x0, plot.bottom-height, max(1, x1-x0), height))
+                pygame.draw.rect(g.screen, AMBER if i == int(np.argmax(probabilities)) else (72, 77, 77), (x0, plot.bottom-height, max(1, x1-x0), height))
             needle_x = round(self.steering_bin_x(angle, plot))
             self.expected_steering_x = needle_x
             line_width = max(1, 2*round(g.ui_scale)-1)
