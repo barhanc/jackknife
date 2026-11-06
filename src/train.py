@@ -6,11 +6,10 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 
 from src.data_generator import SyntheticDataGenerator, ReversingDataset
-from src.model import ControlPFN, NUM_STEER_CLASSES, STEER_CLASSES_RAD
+from src.model import MultiTrailerPFN, NUM_STEER_CLASSES
 
 def train_model(
     num_trajectories: int = 60,
@@ -41,7 +40,7 @@ def train_model(
     val_dataset = generator.generate_dataset(num_trajectories=30, perturb_ratio=0.5)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    model = ControlPFN().to(device)
+    model = MultiTrailerPFN().to(device)
     if not from_scratch and os.path.exists(save_path):
         try:
             ckpt = torch.load(save_path, map_location=device)
@@ -53,32 +52,23 @@ def train_model(
         print("Training model from fresh random weights (from scratch).")
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"ControlPFN architecture initialized ({total_params:,} parameters).")
+    print(f"MultiTrailerPFN architecture initialized ({total_params:,} parameters).")
 
-    classes_rad = torch.tensor(STEER_CLASSES_RAD, device=device, dtype=torch.float32)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
     best_val_acc = 0.0
 
     # If not streaming, generate a single static training set
-    train_loader: Optional[DataLoader] = None
     if not stream:
         print(f"Generating static training set ({num_trajectories} trajectories)...")
-        train_dataset = generator.generate_dataset(num_trajectories=num_trajectories)
+        train_dataset = generator.generate_dataset(num_trajectories=num_trajectories, perturb_ratio=0.5)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
     metrics_history = []
     metrics_path = os.path.join(os.path.dirname(save_path) or ".", "training_metrics.json")
     metrics_csv_path = os.path.join(os.path.dirname(save_path) or ".", "training_metrics.csv")
-
-    if from_scratch:
-        if os.path.exists(metrics_csv_path):
-            try:
-                os.remove(metrics_csv_path)
-            except Exception:
-                pass
 
     # If resuming from checkpoint, try loading existing metrics
     if not from_scratch and os.path.exists(metrics_path):
@@ -94,42 +84,32 @@ def train_model(
         if stream:
             # True PFN dynamic sampling: sample fresh trajectories every epoch
             t_gen = time.time()
-            train_dataset = generator.generate_dataset(num_trajectories=num_trajectories)
+            train_dataset = generator.generate_dataset(num_trajectories=num_trajectories, perturb_ratio=0.5)
             train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
             gen_time = time.time() - t_gen
         else:
             gen_time = 0.0
 
-        assert train_loader is not None
         model.train()
         train_loss = 0.0
         train_correct = 0
         train_adj_correct = 0
-        train_deg_err = 0.0
         total_train = 0
 
         for tokens, hitch_state, targets in train_loader:
             tokens, hitch_state, targets = tokens.to(device), hitch_state.to(device), targets.to(device)
 
             optimizer.zero_grad()
-            res = model(tokens, hitch_state)
-            logits = res[0] if isinstance(res, tuple) else res
-
-            # Standard Cross-Entropy directly against the continuous categorical target distribution
+            logits, _ = model(tokens, hitch_state, return_attention=False)
             loss = criterion(logits, targets)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             train_loss += loss.item() * len(targets)
-            pred_probs = F.softmax(logits, dim=-1)
-            pred_exp = torch.sum(pred_probs * classes_rad, dim=-1)
-            true_exp = torch.sum(targets * classes_rad, dim=-1)
             preds = torch.argmax(logits, dim=-1)
-            target_labels = torch.argmax(targets, dim=-1)
-            train_correct += (preds == target_labels).sum().item()
-            train_adj_correct += (torch.abs(preds - target_labels) <= 1).sum().item()
-            train_deg_err += torch.abs(torch.rad2deg(pred_exp) - torch.rad2deg(true_exp)).sum().item()
+            train_correct += (preds == targets).sum().item()
+            train_adj_correct += (torch.abs(preds - targets) <= 1).sum().item()
             total_train += len(targets)
 
         scheduler.step()
@@ -139,44 +119,33 @@ def train_model(
         val_loss = 0.0
         val_correct = 0
         val_adj_correct = 0
-        val_deg_err = 0.0
         total_val = 0
 
         with torch.no_grad():
             for tokens, hitch_state, targets in val_loader:
                 tokens, hitch_state, targets = tokens.to(device), hitch_state.to(device), targets.to(device)
 
-                res = model(tokens, hitch_state)
-                logits = res[0] if isinstance(res, tuple) else res
-
-                # Standard Cross-Entropy against continuous target distribution
+                logits, _ = model(tokens, hitch_state, return_attention=False)
                 loss = criterion(logits, targets)
 
                 val_loss += loss.item() * len(targets)
-                pred_probs = F.softmax(logits, dim=-1)
-                pred_exp = torch.sum(pred_probs * classes_rad, dim=-1)
-                true_exp = torch.sum(targets * classes_rad, dim=-1)
                 preds = torch.argmax(logits, dim=-1)
-                target_labels = torch.argmax(targets, dim=-1)
-                val_correct += (preds == target_labels).sum().item()
-                val_adj_correct += (torch.abs(preds - target_labels) <= 1).sum().item()
-                val_deg_err += torch.abs(torch.rad2deg(pred_exp) - torch.rad2deg(true_exp)).sum().item()
+                val_correct += (preds == targets).sum().item()
+                val_adj_correct += (torch.abs(preds - targets) <= 1).sum().item()
                 total_val += len(targets)
 
         train_acc = train_correct / total_train * 100.0
         train_adj = train_adj_correct / total_train * 100.0
-        avg_train_deg_err = train_deg_err / total_train
         val_acc = val_correct / total_val * 100.0
         val_adj = val_adj_correct / total_val * 100.0
-        avg_val_deg_err = val_deg_err / total_val
         avg_train_loss = train_loss / total_train
         avg_val_loss = val_loss / total_val
 
         stream_info = f" [Stream +{gen_time:.1f}s]" if stream else ""
         print(
             f"Epoch {epoch:2d}/{epochs:2d}{stream_info} | "
-            f"Train Loss: {avg_train_loss:.4f} (Err: {avg_train_deg_err:.2f}°, Acc: {train_acc:.1f}%, Adj: {train_adj:.1f}%) | "
-            f"Val Loss: {avg_val_loss:.4f} (Err: {avg_val_deg_err:.2f}°, Acc: {val_acc:.1f}%, Adj: {val_adj:.1f}%)"
+            f"Train Loss: {avg_train_loss:.4f} (Acc: {train_acc:.1f}%, Adj: {train_adj:.1f}%) | "
+            f"Val Loss: {avg_val_loss:.4f} (Acc: {val_acc:.1f}%, Adj: {val_adj:.1f}%)"
         )
 
         # Record metrics history for loss analysis & grokking detection
@@ -184,8 +153,6 @@ def train_model(
             "epoch": epoch,
             "train_loss": float(avg_train_loss),
             "val_loss": float(avg_val_loss),
-            "train_deg_err": float(avg_train_deg_err),
-            "val_deg_err": float(avg_val_deg_err),
             "train_acc": float(train_acc),
             "train_adj_acc": float(train_adj),
             "val_acc": float(val_acc),
@@ -209,8 +176,8 @@ def train_model(
         except Exception as e:
             print(f"Warning: Failed to save metrics file: {e}")
 
-        # Always save the newest model and preserve per-epoch intermediate checkpoints
-        checkpoint_dict = {
+        # Always save the newest model every epoch (streaming PFN continuously trains on fresh prior samples)
+        torch.save({
             'model_state_dict': model.state_dict(),
             'train_loss': avg_train_loss,
             'val_loss': avg_val_loss,
@@ -221,12 +188,8 @@ def train_model(
             'epoch': epoch,
             'total_params': total_params,
             'metrics_history': metrics_history
-        }
-        torch.save(checkpoint_dict, save_path)
-        # Always save explicit per-epoch checkpoint models/pfn_epoch_{epoch}.pt
-        epoch_save_path = os.path.join(os.path.dirname(save_path), f"pfn_epoch_{epoch}.pt")
-        torch.save(checkpoint_dict, epoch_save_path)
-        print(f" -> Checkpoint saved to {save_path} and {epoch_save_path} (Latest: Epoch {epoch}, Val Adj Acc: {val_adj:.1f}%)")
+        }, save_path)
+        print(f" -> Checkpoint saved to {save_path} (Latest: Epoch {epoch}, Val Adj Acc: {val_adj:.1f}%)")
 
     print(f"\nTraining completed! Latest checkpoint saved to: {save_path}")
     return model

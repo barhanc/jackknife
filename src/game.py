@@ -12,7 +12,7 @@ os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
 
 from src.kinematics import TractorDoubleTrailerKinematics, VehicleDimensions, VehicleState
 from src.path_generator import Path, smooth_and_constrain_user_path, generate_synthetic_path
-from src.model import ControlPFN
+from src.model import MultiTrailerPFN
 
 # ==============================================================================
 # CLEAN 2.5D NIGHT DIORAMA PALETTE (Tactile Top-Down View)
@@ -98,7 +98,7 @@ class TopDownCamera:
         scale_y = (self.height - margin_y) / self.yard_h
         self.scale = min(scale_x, scale_y)
 
-    def fit_to_bounds(self, min_x: Optional[float] = None, max_x: Optional[float] = None, min_y: Optional[float] = None, max_y: Optional[float] = None, instant: bool = False):
+    def fit_to_bounds(self, min_x: float = None, max_x: float = None, min_y: float = None, max_y: float = None, instant: bool = False):
         # Camera center is permanently locked to yard origin (0, 0)
         self.cx = 0.0
         self.cy = 0.0
@@ -145,7 +145,7 @@ class JackknifeGame25D:
 
         # PyTorch Model
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model: Optional[ControlPFN] = None
+        self.model: Optional[MultiTrailerPFN] = None
         self.model_path = model_path
         self.model_mtime = 0.0
         self.load_model(model_path)
@@ -220,7 +220,7 @@ class JackknifeGame25D:
             try:
                 mtime = os.path.getmtime(path)
                 ckpt = torch.load(path, map_location=self.device)
-                self.model = ControlPFN().to(self.device)
+                self.model = MultiTrailerPFN().to(self.device)
                 self.model.load_state_dict(ckpt['model_state_dict'])
                 self.model.eval()
                 self.model_mtime = mtime

@@ -3,191 +3,172 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
-from typing import Tuple, Optional, Union, Any
+from typing import Tuple, Optional
 
 STEER_CLASSES = [-35.0, -30.0, -25.0, -20.0, -15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0]
 STEER_CLASSES_RAD = [math.radians(deg) for deg in STEER_CLASSES]
 NUM_STEER_CLASSES = len(STEER_CLASSES)  # 15
 
+def steer_to_class_idx(phi_rad: float) -> int:
+    """Finds closest discrete steering class index."""
+    phi_deg = math.degrees(phi_rad)
+    diffs = [abs(phi_deg - c) for c in STEER_CLASSES]
+    return int(diffs.index(min(diffs)))
+
 def class_idx_to_steer(idx: int) -> float:
     """Converts class index to steering angle in radians."""
     return STEER_CLASSES_RAD[idx]
 
-def steer_to_soft_target(phi_rad: float, sigma_deg: float = 4.0) -> np.ndarray:
+
+class MultiTrailerPFN(nn.Module):
     """
-    Converts a continuous steering angle into a smooth Gaussian target distribution
-    over the 15 discrete steering classes.
-    Preserves exact sub-degree steering precision without threshold quantization chatter.
-    """
-    phi_deg = math.degrees(phi_rad)
-    classes = np.array(STEER_CLASSES, dtype=np.float32)
-    sq_diffs = (classes - phi_deg) ** 2
-    probs = np.exp(-0.5 * sq_diffs / (sigma_deg ** 2))
-    probs /= np.sum(probs)
-    return probs.astype(np.float32)
-
-
-
-class ControlPFN(nn.Module):
-    """
-    Prior-Data Fitted Network (ControlPFN) for non-holonomic dynamic trajectory control,
-    built with PyTorch's native nn.Transformer and query diagonal masking.
-
+    In-Context Policy Network (Transformer Policy) for B-Double multi-trailer reversing.
+    
     Inputs:
-        tokens: (B, num_tokens, token_dim) - Egocentric lookahead path stations in Trailer 2 frame
+        tokens: (B, 32, 7) - Egocentric lookahead path stations in Trailer 2 local frame
                 [x_rel, y_rel, cos(theta_rel), sin(theta_rel), kappa, w_L, w_R]
-        hitch_state: (B, state_dim) or (B, query_size, state_dim) - Rig articulation state
-                [sin(beta1), cos(beta1), sin(beta2), cos(beta2)]
-
+        hitch_state: (B, 4) - Trailer hitch angles [sin(beta1), cos(beta1), sin(beta2), cos(beta2)]
+        
     Outputs:
-        logits: (B, num_classes) or (B, query_size, num_classes) - Steering action logits
+        logits: (B, 15) - Discrete steering angle classification logits
+        attn_weights: (B, 32) - Cross-attention weights over the 32 path tokens
     """
     def __init__(
         self,
+        d_model: int = 256,
+        nhead: int = 8,
+        d_ff: int = 1024,
+        num_encoder_layers: int = 6,
+        num_cross_layers: int = 3,
+        num_tokens: int = 64,
         token_dim: int = 7,
         state_dim: int = 4,
-        num_classes: int = NUM_STEER_CLASSES,
-        dim_model: int = 256,
-        dim_feedforward: int = 1024,
-        num_heads: int = 8,
-        num_encoder_layers: int = 6,
-        num_decoder_layers: int = 2,
-        num_tokens: int = 64,
-        dropout: float = 0.0,
+        num_classes: int = 15,
+        dropout: float = 0.0
     ):
         super().__init__()
-        self.token_dim = token_dim
-        self.state_dim = state_dim
-        self.num_classes = num_classes
-        self.dim_model = dim_model
-        self.dim_feedforward = dim_feedforward
+        self.d_model = d_model
         self.num_tokens = num_tokens
 
-        # Feature projections for memory (path tokens) and query (hitch state)
-        self.map_src = nn.Linear(token_dim, dim_model)
-        self.map_tgt = nn.Linear(state_dim, dim_model)
+        # Context Encoder projections
+        self.token_proj = nn.Linear(token_dim, d_model)
+        self.pos_embed = nn.Parameter(torch.randn(1, num_tokens, d_model) * 0.02)
 
-        # PyTorch Built-in Transformer
-        self.transformer = nn.Transformer(
-            d_model=dim_model,
-            nhead=num_heads,
-            num_encoder_layers=num_encoder_layers,
-            num_decoder_layers=num_decoder_layers,
-            dim_feedforward=dim_feedforward,
+        # Transformer Encoder for path context
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=d_ff,
             dropout=dropout,
             activation="gelu",
-            batch_first=True,
+            batch_first=True
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+
+        # Hitch state query projection
+        self.state_proj = nn.Sequential(
+            nn.Linear(state_dim, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model)
         )
 
-        # Policy MLP Head
-        self.map_out = nn.Sequential(
-            nn.Linear(dim_model, dim_feedforward),
+        # Cross-Attention Layers (Query attends to Path Memory)
+        self.cross_attn1 = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, batch_first=True)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.cross_ff1 = nn.Sequential(
+            nn.Linear(d_model, d_ff),
             nn.GELU(),
-            nn.Linear(dim_feedforward, num_classes),
+            nn.Linear(d_ff, d_model)
+        )
+        self.norm_ff1 = nn.LayerNorm(d_model)
+
+        self.cross_attn2 = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, batch_first=True)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.cross_ff2 = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.GELU(),
+            nn.Linear(d_ff, d_model)
+        )
+        self.norm_ff2 = nn.LayerNorm(d_model)
+
+        # Policy MLP Head
+        self.head = nn.Sequential(
+            nn.Linear(d_model, 64),
+            nn.GELU(),
+            nn.Linear(64, num_classes)
         )
 
     def forward(
         self,
         tokens: torch.Tensor,
         hitch_state: torch.Tensor,
-        return_attention: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        return_attention: bool = True
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Args:
-            tokens (Tensor): Shape `(batch_size, num_tokens, token_dim)`
-            hitch_state (Tensor): Shape `(batch_size, state_dim)` or `(batch_size, query_size, state_dim)`
-            return_attention (bool): Optional flag for compatibility with tuple unpacking callers.
-
-        Returns:
-            Tensor or Tuple[Tensor, None]: Action logits `(batch_size, num_classes)`
+        tokens: (B, 32, 7)
+        hitch_state: (B, 4)
         """
-        assert tokens.ndim == 3, f"Expected tokens ndim == 3, got {tokens.ndim}"
+        B = tokens.size(0)
 
-        is_2d_query = (hitch_state.ndim == 2)
-        X_query = hitch_state.unsqueeze(1) if is_2d_query else hitch_state
+        # Encode path tokens
+        x = self.token_proj(tokens) + self.pos_embed  # (B, 32, d_model)
+        memory = self.encoder(x)                      # (B, 32, d_model)
 
-        assert tokens.size(0) == X_query.size(0), "Batch sizes must match"
-        assert tokens.size(2) == self.token_dim, f"Token dim mismatch: expected {self.token_dim}, got {tokens.size(2)}"
-        assert X_query.size(2) == self.state_dim, f"State dim mismatch: expected {self.state_dim}, got {X_query.size(2)}"
+        # Encode hitch state as query
+        q = self.state_proj(hitch_state).unsqueeze(1) # (B, 1, d_model)
 
-        query_size = X_query.size(1)
+        # Cross-attention layer 1
+        attn_out1, _ = self.cross_attn1(query=q, key=memory, value=memory)
+        q = self.norm1(q + attn_out1)
+        q = self.norm_ff1(q + self.cross_ff1(q))
 
-        # Diagonal mask: queries evaluate independently, attending only to self and encoder memory
-        tgt_mask = -torch.eye(query_size, device=X_query.device) + 1.0
-        tgt_mask[tgt_mask == 1.0] = float('-inf')
+        # Cross-attention layer 2 (capture attention weights)
+        attn_out2, attn_weights = self.cross_attn2(
+            query=q, key=memory, value=memory,
+            need_weights=return_attention,
+            average_attn_weights=True
+        )
+        q = self.norm2(q + attn_out2)
+        q = self.norm_ff2(q + self.cross_ff2(q)) # (B, 1, d_model)
 
-        # Encode trajectory context (relying purely on continuous spatial coordinates)
-        src = self.map_src(tokens)
+        # Predict steering logits
+        q_squeezed = q.squeeze(1) # (B, d_model)
+        logits = self.head(q_squeezed) # (B, 15)
 
-        # Query vehicle articulation state
-        tgt = self.map_tgt(X_query)
+        if return_attention and attn_weights is not None:
+            # attn_weights shape: (B, 1, 32) -> squeeze to (B, 32)
+            attn_weights = attn_weights.squeeze(1)
+            return logits, attn_weights
+        return logits, None
 
-        # PyTorch Built-in Transformer execution
-        if not return_attention:
-            out = self.transformer(src, tgt, tgt_mask=tgt_mask.to(tgt.dtype))
-            attn_weights = None
-        else:
-            # Step through decoder to extract exact cross-attention weights
-            memory = self.transformer.encoder(src)
-            x = tgt
-            for layer in self.transformer.decoder.layers[:-1]:
-                x = layer(x, memory, tgt_mask=tgt_mask.to(tgt.dtype))
-
-            last_layer: Any = self.transformer.decoder.layers[-1]
-            x_sa = last_layer.norm1(x + last_layer._sa_block(x, tgt_mask.to(tgt.dtype), None))
-            attn_out, attn_weights = last_layer.multihead_attn(
-                x_sa, memory, memory,
-                need_weights=True,
-                average_attn_weights=True
-            )
-            x = last_layer.norm2(x_sa + last_layer.dropout2(attn_out))
-            out = last_layer.norm3(x + last_layer._ff_block(x))
-
-        out = self.map_out(out)
-
-        if is_2d_query:
-            out = out.squeeze(1)
-            if attn_weights is not None:
-                attn_weights = attn_weights.squeeze(1)
-
-        if return_attention:
-            return out, attn_weights
-        return out
-
-    @torch.no_grad()
     def predict_action(
         self,
-        tokens_np: np.ndarray,
-        hitch_state_np: np.ndarray,
+        tokens_np,
+        hitch_state_np,
         device: torch.device,
-        use_expectation: bool = True,
-        temperature: float = 1.0
+        use_expectation: bool = True
     ) -> Tuple[float, np.ndarray, np.ndarray]:
         """
-        Single-sample runtime inference helper for game simulation execution.
+        Convenience inference helper for single-sample runtime execution.
         Returns:
-            steer_rad: Continuous steering angle (via expectation or argmax)
-            attn_weights: (num_tokens,) array
-            probs: (num_classes,) probability distribution
+            steer_rad: continuous steering angle corresponding to argmax / expectation
+            attention_weights: (num_tokens,) numpy array
+            probs: (15,) action probabilities distribution numpy array
         """
         self.eval()
-        t_tok = torch.from_numpy(tokens_np).float().unsqueeze(0).to(device)
-        t_state = torch.from_numpy(hitch_state_np).float().unsqueeze(0).to(device)
+        with torch.no_grad():
+            t_tok = torch.from_numpy(tokens_np).float().unsqueeze(0).to(device)
+            t_state = torch.from_numpy(hitch_state_np).float().unsqueeze(0).to(device)
 
-        logits, attn = self(t_tok, t_state, return_attention=True)
-        temp = max(float(temperature), 1e-4)
-        probs = F.softmax(logits / temp, dim=-1).cpu().numpy()[0]
-
-        if use_expectation:
-            # Softmax expected value: eliminates quantization chatter
-            steer_rad = float(np.sum(probs * np.array(STEER_CLASSES_RAD)))
-        else:
-            best_idx = int(np.argmax(probs))
-            steer_rad = class_idx_to_steer(best_idx)
-
-        if attn is not None:
-            attn_weights = attn.cpu().numpy()[0]
-        else:
-            attn_weights = np.ones(tokens_np.shape[0], dtype=np.float32) / float(tokens_np.shape[0])
-        return steer_rad, attn_weights, probs
+            logits, attn = self(t_tok, t_state, return_attention=True)
+            probs = F.softmax(logits, dim=-1).cpu().numpy()[0]
+            
+            if use_expectation:
+                # Continuous softmax expected value: eliminates quantization dither
+                steer_rad = float(np.sum(probs * np.array(STEER_CLASSES_RAD)))
+            else:
+                best_idx = int(np.argmax(probs))
+                steer_rad = class_idx_to_steer(best_idx)
+            
+            attn_weights = attn.cpu().numpy()[0] if attn is not None else np.ones(t_tok.shape[1]) / float(t_tok.shape[1])
+            return steer_rad, attn_weights, probs
