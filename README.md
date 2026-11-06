@@ -23,8 +23,8 @@ Run the simulation in autonomous mode (loads `models/model.pt` by default):
 uv run python main.py
 ```
 
-Train the ControlTransformer policy using the streaming synthetic data pipeline:
+Train the model:
 
 ```bash
-uv run python main.py --train --epochs 100 --batch-size 64 --lr 3e-4 --stream
+uv run python main.py --train --epochs 4 --batch-size 64 --lr 3e-4 --stream --trajectories 60
 ```
