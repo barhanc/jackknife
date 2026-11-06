@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { axles, initialState, step, type Point, type State } from '../src/simulation/physics';
 import { drawnRoute, progression, tokensFor, type Route } from '../src/simulation/path';
 import { Game } from '../src/simulation/game';
@@ -120,5 +120,33 @@ it('uses the same simulated controller cadence at 1× and 16×', async () => {
     await game.advance(0.08 / speed);
     expect(calls.length).toBe(1);
     expect(game.simulatedSeconds).toBeCloseTo(0.08, 10);
+  }
+});
+
+it('drains fast-forward steps independently of render-frame elapsed time', async () => {
+  let now = 0;
+  const clock = vi.spyOn(performance, 'now').mockImplementation(() => (now += 20));
+  const calls: number[] = [];
+  const policy: Policy = {
+    async predict() {
+      calls.push(1);
+      return {
+        steer: 0,
+        probabilities: Array(15).fill(1 / 15),
+        attention: Array(64).fill(1 / 64),
+        milliseconds: 5,
+        logits: [],
+      };
+    },
+    dispose() {},
+  };
+  try {
+    const game = new Game(route, policy);
+    game.speedMultiplier = 16;
+    await game.advance(0.02);
+    expect(game.simulatedSeconds).toBeCloseTo(0.32, 10);
+    expect(calls.length).toBe(4);
+  } finally {
+    clock.mockRestore();
   }
 });

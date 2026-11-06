@@ -24,7 +24,7 @@ export class Game {
   paused = false;
   drawing = false;
   rays = false;
-  diagnostics = false;
+  diagnostics = true;
   probabilities = Array(15).fill(1 / 15) as number[];
   attention = Array(64).fill(1 / 64) as number[];
   inferenceMs = 0;
@@ -150,10 +150,9 @@ export class Game {
     );
     if (this.advancing) return;
     this.advancing = true;
-    const generation = this.generation,
-      start = performance.now();
+    const generation = this.generation;
     try {
-      while (this.accumulator + 1e-12 >= DT && performance.now() - start < 12) {
+      while (this.accumulator + 1e-12 >= DT) {
         this.checkStatus();
         if (this.status) {
           this.speed = 0;

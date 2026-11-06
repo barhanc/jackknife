@@ -1,12 +1,45 @@
 /** Explicit ?test mode for numerical parity and browser integration tests. */
+import type { TgpuRoot } from 'typegpu';
+import { Mesh, createPainter, type Color } from './rendering/primitives';
+import { vehicle } from './rendering/vehicle';
+import type { Point, State } from './simulation/physics';
 import type { Policy } from './inference/policy';
 import type { Game } from './simulation/game';
 import { drawnRoute } from './simulation/path';
-export function attachHarness(game: Game, policy: Policy) {
+export function attachHarness(game: Game, policy: Policy, root: TgpuRoot) {
   Object.assign(window, {
     jackknifeTest: {
       game,
       drawnRoute,
+      async renderTruck(sample: { width: number; height: number; scale: number; state: State }) {
+        const canvas = document.createElement('canvas');
+        canvas.width = sample.width;
+        canvas.height = sample.height;
+        const commands: { kind: string; points: Point[]; color: Color; width?: number }[] = [];
+        class Capture extends Mesh {
+          override polygon(points: Point[], color: Color) {
+            commands.push({ kind: 'polygon', points: points.map((p) => this.project(p)), color });
+            super.polygon(points, color);
+          }
+          override line(a: Point, b: Point, width: number, color: Color) {
+            commands.push({
+              kind: 'line',
+              points: [this.project(a), this.project(b)],
+              color,
+              width,
+            });
+            super.line(a, b, width, color);
+          }
+        }
+        const mesh = new Capture(sample.scale, sample.width, sample.height);
+        const painter = createPainter(root, canvas);
+        vehicle(mesh, sample.state);
+        painter.draw(mesh);
+        await root.device.queue.onSubmittedWorkDone();
+        const png = canvas.toDataURL('image/png');
+        painter.dispose();
+        return { png, commands };
+      },
       async benchmark(count = 200) {
         game.setPaused(true);
         const fixtures = await (

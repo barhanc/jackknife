@@ -171,7 +171,7 @@ async function boot() {
   );
   if (new URLSearchParams(location.search).has('test')) {
     const { attachHarness } = await import('./testHarness');
-    attachHarness(game, policy);
+    attachHarness(game, policy, root);
   }
 }
 boot().catch((e) => {

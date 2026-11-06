@@ -193,12 +193,7 @@ export function createRenderer(
       }
       dynamic.clearRect(0, 0, camera.width, camera.height);
       snow.clearRect(0, 0, camera.width, camera.height);
-      const mesh = new Mesh(
-        (2 * camera.scale) / camera.width,
-        (2 * camera.scale) / camera.height,
-        camera.width,
-        camera.height,
-      );
+      const mesh = new Mesh(camera.scale, camera.width, camera.height);
       if (!editing) {
         dockLights(dynamic, true);
         shadow(game.state);

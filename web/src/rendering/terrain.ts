@@ -1,7 +1,7 @@
 /** Desktop depot placement and paint rules, using the same seeded scenery and snow assets. */
 import { initialState, axles, type Point } from '../simulation/physics';
 import type { Route } from '../simulation/path';
-import { type Assets, type RGB, polygon, line, rect, fill, css } from './assets';
+import { type Assets, type RGB, polygon, line, rect, fill, css, circle } from './assets';
 export interface Camera {
   width: number;
   height: number;
@@ -204,18 +204,12 @@ function drawProp(
     ]),
     [16, 20, 26],
   );
-  const circle = (point: Point, r: number, color: RGB) => {
-    ctx.fillStyle = css(color);
-    ctx.beginPath();
-    ctx.arc(...point, r, 0, Math.PI * 2);
-    ctx.fill();
-  };
   if (p.kind === 'light') {
     const center = camera.project(p.x, p.y),
       top: Point = [center[0] - 2, center[1] - Math.round(px * 1.3)];
-    circle(center, Math.max(2, Math.round(px * 0.6)), [58, 62, 62]);
+    circle(ctx, center, Math.max(2, Math.round(px * 0.6)), [58, 62, 62]);
     line(ctx, center, top, [136, 136, 117], 2);
-    circle(top, Math.max(2, Math.round(px * 0.22)), [255, 207, 117]);
+    circle(ctx, top, Math.max(2, Math.round(px * 0.22)), [255, 207, 117]);
     return;
   }
   const palette: RGB[] = [
@@ -276,9 +270,17 @@ function drawProp(
         w = Math.max(3, Math.round(px * 3.6)),
         door = rect(x - Math.floor(w / 2), y - lift, w, lift);
       fill(ctx, door, [19, 25, 31]);
-      ctx.strokeStyle = css([126, 115, 74]);
-      ctx.lineWidth = 1;
-      ctx.strokeRect(door.x + 0.5, door.y + 0.5, door.w - 1, door.h - 1);
+      polygon(
+        ctx,
+        [
+          [door.x, door.y],
+          [door.x + door.w - 1, door.y],
+          [door.x + door.w - 1, door.y + door.h - 1],
+          [door.x, door.y + door.h - 1],
+        ],
+        [126, 115, 74],
+        1,
+      );
     }
     label(
       ctx,

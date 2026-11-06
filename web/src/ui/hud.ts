@@ -42,6 +42,8 @@ export function createHud(app: HTMLElement) {
     scroll = 0,
     limit = 0,
     pointer: [number, number] = [-1, -1];
+  let histogram: number[] = [];
+  let histogramAt = 0;
   let specs: {
     id: string;
     r: Rect;
@@ -289,9 +291,9 @@ export function createHud(app: HTMLElement) {
     const binX = (angle: number) =>
       plot.x + plot.w / 30 + ((angle + 35) / 70) * ((plot.w * 14) / 15);
     if (game.mode === 'AUTONOMOUS') {
-      const max = Math.max(0.2, ...game.probabilities),
-        best = game.probabilities.indexOf(Math.max(...game.probabilities));
-      game.probabilities.forEach((p, i) => {
+      const max = Math.max(0.2, ...histogram),
+        best = histogram.indexOf(Math.max(...histogram));
+      histogram.forEach((p, i) => {
         const x0 = plot.x + Math.round((i * plot.w) / 15),
           x1 = plot.x + Math.round(((i + 1) * plot.w) / 15) - 2,
           h = Math.max(2, Math.round((p / max) * plot.h));
@@ -301,7 +303,7 @@ export function createHud(app: HTMLElement) {
           i === best ? AMBER : [72, 77, 77],
         );
       });
-      const angle = game.probabilities.reduce((sum, p, i) => sum + p * (-35 + 5 * i), 0),
+      const angle = histogram.reduce((sum, p, i) => sum + p * (-35 + 5 * i), 0),
         x = Math.round(binX(angle)),
         radius = Math.max(3, Math.round(4 * s));
       line(
@@ -475,6 +477,14 @@ export function createHud(app: HTMLElement) {
     },
     update(game: Game) {
       if (!assets) return;
+      const now = performance.now();
+      if (!histogram.length || !game.inferenceMs) histogram = game.probabilities.slice();
+      else {
+        const weight = 1 - Math.exp(-(now - histogramAt) / 120);
+        histogram = histogram.map((value, i) => value + weight * (game.probabilities[i] - value));
+      }
+      histogramAt = now;
+
       const { top, bottom } = layout(game),
         { width, height, scale: s, pad, gap, toolbar, footer, yard } = current;
       if (overlay.width !== width || overlay.height !== height) {

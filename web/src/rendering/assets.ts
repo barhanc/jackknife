@@ -1,3 +1,5 @@
+import { fillCircle, fillPolygon, strokeLine } from './pixelRaster';
+import type { Point } from '../simulation/physics';
 /** Desktop-generated bitmaps preserve Pygame's fonts, snow seed and light fields. */
 export type Rect = { x: number; y: number; w: number; h: number };
 export const rect = (x = 0, y = 0, w = 0, h = 0): Rect => ({
@@ -138,18 +140,14 @@ export function polygon(
   width = 0,
   alpha = 1,
 ) {
-  ctx.beginPath();
-  ctx.moveTo(points[0][0], points[0][1]);
-  for (const p of points.slice(1)) ctx.lineTo(p[0], p[1]);
-  ctx.closePath();
-  if (width) {
-    ctx.strokeStyle = css(color, alpha);
-    ctx.lineWidth = width;
-    ctx.stroke();
-  } else {
-    ctx.fillStyle = css(color, alpha);
-    ctx.fill();
-  }
+  const pixels: Point[] = points.map((p) => [Math.trunc(p[0]), Math.trunc(p[1])]);
+  ctx.fillStyle = css(color, alpha);
+  const span = (y: number, left: number, right: number) =>
+    ctx.fillRect(left, y, right - left + 1, 1);
+  if (width)
+    for (let i = 0; i < pixels.length; i++)
+      strokeLine(pixels[i], pixels[(i + 1) % pixels.length], Math.max(1, Math.trunc(width)), span);
+  else fillPolygon(pixels, span);
 }
 export function line(
   ctx: CanvasRenderingContext2D,
@@ -159,14 +157,29 @@ export function line(
   width = 1,
   alpha = 1,
 ) {
-  ctx.beginPath();
-  ctx.moveTo(Math.trunc(a[0]) + 0.5, Math.trunc(a[1]) + 0.5);
-  ctx.lineTo(Math.trunc(b[0]) + 0.5, Math.trunc(b[1]) + 0.5);
-  ctx.strokeStyle = css(color, alpha);
-  ctx.lineWidth = width;
-  ctx.stroke();
+  ctx.fillStyle = css(color, alpha);
+  strokeLine(
+    [Math.trunc(a[0]), Math.trunc(a[1])],
+    [Math.trunc(b[0]), Math.trunc(b[1])],
+    Math.max(1, Math.trunc(width)),
+    (y, left, right) => ctx.fillRect(left, y, right - left + 1, 1),
+  );
 }
+
 export function fill(ctx: CanvasRenderingContext2D, r: Rect, color: RGB) {
   ctx.fillStyle = css(color);
   ctx.fillRect(r.x, r.y, r.w, r.h);
+}
+
+export function circle(
+  ctx: CanvasRenderingContext2D,
+  point: readonly number[],
+  radius: number,
+  color: RGB,
+  alpha = 1,
+) {
+  ctx.fillStyle = css(color, alpha);
+  fillCircle(Math.trunc(point[0]), Math.trunc(point[1]), Math.trunc(radius), (y, left, right) =>
+    ctx.fillRect(left, y, right - left + 1, 1),
+  );
 }

@@ -1,6 +1,7 @@
 /** Batched alpha-blended polygon rendering through TypeGPU. */
 import tgpu, { d, type TgpuRoot } from 'typegpu';
 import type { Point } from '../simulation/physics';
+import { fillPolygon, strokeLine } from './pixelRaster';
 export type Color = [number, number, number, number?];
 const Vertex = d.struct({ position: d.vec2f, color: d.vec4f });
 const layout = tgpu.vertexLayout((n) => d.arrayOf(Vertex, n));
@@ -18,43 +19,90 @@ const fragment = tgpu.fragmentFn({ in: { color: d.vec4f }, out: d.vec4f })(({ co
 export class Mesh {
   data: number[] = [];
   constructor(
-    readonly scaleX: number,
-    readonly scaleY: number,
+    readonly scale: number,
     readonly width: number,
     readonly height: number,
   ) {}
-  vertex(p: Point, color: Color) {
-    const pixelX = Math.trunc(Math.floor(this.width / 2) + (p[0] * this.scaleX * this.width) / 2);
-    const pixelY = Math.trunc(Math.floor(this.height / 2) - (p[1] * this.scaleY * this.height) / 2);
+  project(p: Point): Point {
+    return [
+      Math.trunc(Math.floor(this.width / 2) + p[0] * this.scale),
+      Math.trunc(Math.floor(this.height / 2) - p[1] * this.scale),
+    ];
+  }
+  private span(y: number, left: number, right: number, color: Color) {
+    if (y < 0 || y >= this.height) return;
+    left = Math.max(0, left);
+    right = Math.min(this.width - 1, right);
+    if (right < left) return;
+    const x0 = (left / this.width) * 2 - 1,
+      x1 = ((right + 1) / this.width) * 2 - 1;
+    const y0 = 1 - (y / this.height) * 2,
+      y1 = 1 - ((y + 1) / this.height) * 2;
+    const r = color[0] / 255,
+      g = color[1] / 255,
+      b = color[2] / 255,
+      a = color[3] ?? 1;
     this.data.push(
-      (pixelX / this.width) * 2 - 1,
-      1 - (pixelY / this.height) * 2,
+      x0,
+      y0,
       0,
       0,
-      Math.round(color[0]) / 255,
-      Math.round(color[1]) / 255,
-      Math.round(color[2]) / 255,
-      color[3] ?? 1,
+      r,
+      g,
+      b,
+      a,
+      x1,
+      y0,
+      0,
+      0,
+      r,
+      g,
+      b,
+      a,
+      x1,
+      y1,
+      0,
+      0,
+      r,
+      g,
+      b,
+      a,
+      x0,
+      y0,
+      0,
+      0,
+      r,
+      g,
+      b,
+      a,
+      x1,
+      y1,
+      0,
+      0,
+      r,
+      g,
+      b,
+      a,
+      x0,
+      y1,
+      0,
+      0,
+      r,
+      g,
+      b,
+      a,
     );
   }
   polygon(points: Point[], color: Color) {
-    for (let i = 1; i < points.length - 1; i++)
-      for (const p of [points[0], points[i], points[i + 1]]) this.vertex(p, color);
+    fillPolygon(
+      points.map((p) => this.project(p)),
+      (y, left, right) => this.span(y, left, right, color),
+    );
   }
+  /** Stroke width is measured in screen pixels, as in pygame.draw.lines. */
   line(a: Point, b: Point, width: number, color: Color) {
-    width = Math.max(width, 2 / (this.scaleX * this.width));
-    const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
-    if (length < 1e-9) return;
-    const nx = ((-(b[1] - a[1]) / length) * width) / 2,
-      ny = (((b[0] - a[0]) / length) * width) / 2;
-    this.polygon(
-      [
-        [a[0] + nx, a[1] + ny],
-        [a[0] - nx, a[1] - ny],
-        [b[0] - nx, b[1] - ny],
-        [b[0] + nx, b[1] + ny],
-      ],
-      color,
+    strokeLine(this.project(a), this.project(b), width, (y, left, right) =>
+      this.span(y, left, right, color),
     );
   }
 }
