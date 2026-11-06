@@ -1,0 +1,36 @@
+{
+  "name": "jackknife-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "test:browser": "playwright test",
+    "export-model": "cd .. && uv run python web/tools/export_web_model.py",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "pack:runntime": "node scripts/pack-runntime.mjs"
+  },
+  "dependencies": {
+    "@jackknife/runntime-core": "file:packages/jackknife-runntime-core-0.2.0-f6db0ea.tgz",
+    "typegpu": "0.12.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^25.9.9",
+    "@types/pngjs": "^6.0.5",
+    "@webgpu/types": "^0.1.64",
+    "pngjs": "^7.0.0",
+    "prettier": "^3.9.5",
+    "tsdown": "^0.23.1",
+    "typescript": "npm:tsover@^5.9.13",
+    "unplugin-typegpu": "0.12.3",
+    "vite": "^7.2.2",
+    "vitest": "^4.1.12"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

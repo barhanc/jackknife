@@ -93,3 +93,12 @@ models/*.csv
 *.swp
 *~
 .DS_Store
+
+# Browser dependencies, generated model export, and test artifacts
+web/node_modules/
+web/public/models/*
+web/playwright-report/
+web/test-results/
+web/public/assets/
+!web/scripts/
+!web/scripts/pack-runntime.mjs

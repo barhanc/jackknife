@@ -211,7 +211,7 @@ class VehicleRenderer:
                 return point(x2,y2,h2,rear_offset-.1,y,z)
             polygon([rp(side-.12,.53),rp(side+.12,.53),rp(side+.12,.77),rp(side-.12,.77)],color,(28,35,39))
 
-        for _,points,color,outline,width in sorted(faces,key=lambda item:item[0]):
+        for _,points,color,outline,width in sorted(faces,key=lambda item:round(item[0],9)):
             pixels=[project(p) for p in points]
             if width:
                 pygame.draw.lines(surface,color,False,pixels,width)

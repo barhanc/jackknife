@@ -180,7 +180,7 @@ class JackknifeGame25D:
         self.current_speed = 0.0
         self.target_steer = 0.0
         self.current_path_idx = 0  # Monotonic curve arc-length tracker (handles 8-shapes and loops)
-        self.time_multiplier = 1   # Fast-forward simulation speed warp: 1x through 16x
+        self.time_multiplier = 16  # Fast-forward simulation speed warp: 1x through 16x
         self.speed_options = [1, 2, 4, 8, 16]
 
         # Drawing mode
@@ -200,9 +200,10 @@ class JackknifeGame25D:
         # Telemetry & Atmosphere
         self.cross_track_err = 0.0
         self.inference_time_ms = 0.0
+        self._inference_stats_time = 0.0
         self.attention_weights = np.ones(64) / 64.0
         self.action_probs = np.ones(15) / 15.0
-        self.show_help = False
+        self.show_help = True
         self.show_rays = False
         self.frame_count = 0
         self.hud = GameHUD(self)
@@ -414,6 +415,7 @@ class JackknifeGame25D:
         self.is_off_track = False
         self.cross_track_err = 0.0
         self.inference_time_ms = 0.0
+        self._inference_stats_time = 0.0
         self.attention_weights = np.ones(64) / 64.0
         self.action_probs = np.ones(15) / 15.0
         self.auto_frame_camera(instant=True)
@@ -620,7 +622,13 @@ class JackknifeGame25D:
         else:
             self.target_steer = float(np.clip(-2.2 * self.state.beta1 - 1.6 * self.state.beta2, -self.dims.max_steer_rad, self.dims.max_steer_rad))
 
-        self.inference_time_ms = (time.perf_counter() - t_start) * 1000.0
+        t_end = time.perf_counter()
+        sample_ms = (t_end - t_start) * 1000.0
+        # Half-second wall-time smoothing behaves consistently at every speed.
+        previous = self._inference_stats_time
+        weight = 1.0 - math.exp(-(t_end - previous) / .5) if previous else 1.0
+        self.inference_time_ms += weight * (sample_ms - self.inference_time_ms)
+        self._inference_stats_time = t_end
 
     def update_physics(self, run_inference: bool = True):
         if self.kinematics.is_jackknifed(self.state) or self.is_off_track:
@@ -718,13 +726,9 @@ class JackknifeGame25D:
             if step in [3, 6, 9, 12, 15]:
                 alpha = int(30 + (step / num_ghost_steps) * 85)
                 polys = self.kinematics.get_body_polygons(future_state)
-                for part, color in [
-                    ('cab', (245, 175, 45)),
-                    ('trailer1', (65, 160, 245)),
-                    ('trailer2', (45, 225, 255))
-                ]:
+                for part in ('cab', 'trailer1', 'trailer2'):
                     pts = [self.camera.project(p[0], p[1]) for p in polys[part]]
-                    pygame.draw.polygon(ghost_surf, (*color, alpha), pts, 1)
+                    pygame.draw.polygon(ghost_surf, (255, 255, 255, alpha), pts, 1)
 
     def draw_attention_rays(self):
         if self.mode != "AUTONOMOUS" and not self.ai_save_active:
