@@ -1,15 +1,11 @@
-![Showcase](.github/assets/showcase.gif)
+![Manual steering at 2× and jackknife recovery, complex route drawing, and autonomous reversing at 16× with telemetry and attention rays](.github/assets/showcase.gif)
 
 ## Quick Start
 
 This repository uses [`uv`](https://docs.astral.sh/uv/) for fast, reproducible
 dependency management and execution.
 
-If you do not have `uv` installed:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
+[Install uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 Install Dependencies
 
