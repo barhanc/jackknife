@@ -10,9 +10,10 @@ class Path:
     Equidistant arc-length reparameterized path with physical curvature constraints.
     Stores stations with (x, y, headings, curvatures, s).
     """
-    def __init__(self, x: np.ndarray, y: np.ndarray, ds: float = 0.8, constrain_curvature: bool = True):
+    def __init__(self, x: np.ndarray, y: np.ndarray, ds: float = 0.8, constrain_curvature: bool = True, smoothing_sigma: float = 1.5):
         self.ds = ds
         self.constrain_curvature = constrain_curvature
+        self.smoothing_sigma = smoothing_sigma
         if len(x) < 2:
             self.x = np.array(x, dtype=np.float64)
             self.y = np.array(y, dtype=np.float64)
@@ -52,9 +53,9 @@ class Path:
         interp_y = np.interp(s_samples, cum_dist, pts_y)
 
         # 4. Optional Gaussian filter for raw mouse jitter removal
-        if self.constrain_curvature and len(interp_x) > 6:
-            interp_x = gaussian_filter1d(interp_x, sigma=1.5, mode='nearest')
-            interp_y = gaussian_filter1d(interp_y, sigma=1.5, mode='nearest')
+        if self.constrain_curvature and self.smoothing_sigma > 0 and len(interp_x) > 6:
+            interp_x = gaussian_filter1d(interp_x, sigma=self.smoothing_sigma, mode='nearest')
+            interp_y = gaussian_filter1d(interp_y, sigma=self.smoothing_sigma, mode='nearest')
 
         self.x = interp_x
         self.y = interp_y
@@ -232,17 +233,17 @@ class Path:
         return tokens
 
 
-def smooth_and_constrain_user_path(raw_points: List[Tuple[float, float]], ds: float = 0.8, min_radius: float = 12.5) -> Path:
+def smooth_and_constrain_user_path(raw_points: List[Tuple[float, float]], ds: float = 0.8, min_radius: float = 12.5, lead_in_m: float = 0.0) -> Path:
     """
     Takes raw freehand mouse points from user drawing and applies:
     1. Distance-based deduplication and arc-length resampling.
-    2. Physical curvature relaxation: iteratively smooths path until local radius R >= min_radius (12.5m).
+    2. Light jitter removal, then local relaxation around overly tight turns.
     3. Anchors start and end points so user's intended start/dock positions are preserved.
     """
     if len(raw_points) < 3:
         raw_x = np.array([p[0] for p in raw_points])
         raw_y = np.array([p[1] for p in raw_points])
-        return Path(raw_x, raw_y, ds=ds)
+        return Path(raw_x, raw_y, ds=ds, smoothing_sigma=0.0)
 
     pts = np.array(raw_points, dtype=np.float64)
 
@@ -250,16 +251,21 @@ def smooth_and_constrain_user_path(raw_points: List[Tuple[float, float]], ds: fl
     d = np.hypot(np.diff(pts[:, 0]), np.diff(pts[:, 1]))
     keep = np.ones(len(pts), dtype=bool)
     keep[1:] = d > 0.4
+    keep[-1] = True
     pts = pts[keep]
 
     if len(pts) < 3:
-        return Path(pts[:, 0], pts[:, 1], ds=ds)
+        return Path(pts[:, 0], pts[:, 1], ds=ds, smoothing_sigma=0.0)
 
     seg_dist = np.hypot(np.diff(pts[:, 0]), np.diff(pts[:, 1]))
     cum_dist = np.insert(np.cumsum(seg_dist), 0, 0.0)
     total_len = cum_dist[-1]
     if total_len < 6.0:
-        return Path(pts[:, 0], pts[:, 1], ds=ds)
+        if lead_in_m > 0:
+            chord = float(np.linalg.norm(pts[-1]-pts[0]))
+            if chord > 1e-3:
+                return Path(np.array([pts[0,0],pts[-1,0]]),np.array([pts[0,1],pts[-1,1]]),ds=min(ds,chord/3),smoothing_sigma=0.0)
+        return Path(pts[:, 0], pts[:, 1], ds=ds, smoothing_sigma=0.0)
 
     num_pts = max(5, int(math.ceil(total_len / ds)) + 1)
     s = np.linspace(0.0, total_len, num_pts)
@@ -269,25 +275,53 @@ def smooth_and_constrain_user_path(raw_points: List[Tuple[float, float]], ds: fl
     p0 = np.array([px[0], py[0]])
     p_end = np.array([px[-1], py[-1]])
 
-    kappa_max = 1.0 / max(5.0, min_radius)
-    cur_x, cur_y = px, py
-    sigma = 1.5
-    for _ in range(35):
-        sx = gaussian_filter1d(cur_x, sigma=sigma, mode='nearest')
-        sy = gaussian_filter1d(cur_y, sigma=sigma, mode='nearest')
-        sx[0], sy[0] = p0
-        sx[-1], sy[-1] = p_end
-
-        dx = np.gradient(sx, s)
-        dy = np.gradient(sy, s)
-        th = np.arctan2(dy, dx)
-        curv = np.gradient(np.unwrap(th), s)
-        cur_x, cur_y = sx, sy
-        if np.max(np.abs(curv)) <= kappa_max:
+    # A gentle first pass removes mouse jitter without flattening valid bends.
+    curve = gaussian_filter1d(np.column_stack((px, py)), sigma=1.2, axis=0, mode='nearest')
+    curve[0], curve[-1] = p0, p_end
+    pinned_prefix = 0
+    straight = curve.copy()
+    if lead_in_m > 0:
+        # Replace the first stretch, rather than extending outside the lot.
+        # Its chord stays inside the drawing bounds and its stations are pinned
+        # throughout corner relaxation so smoothing cannot bend the lead-in.
+        length = min(lead_in_m, total_len/3)
+        pinned_prefix = min(len(s)-2, max(1, int(np.searchsorted(s, length))))
+        offset = curve[pinned_prefix]-p0
+        if np.linalg.norm(offset) < 1e-6:
+            farthest = int(np.argmax(np.linalg.norm(curve[:pinned_prefix+1]-p0,axis=1)))
+            offset = curve[farthest]-p0
+        straight = p0+s[:,None]/s[pinned_prefix]*offset
+        blend = np.clip((s-s[pinned_prefix])/max(8.0,min(12.0,total_len-length)),0,1)
+        blend = blend*blend*(3-2*blend)
+        curve = straight*(1-blend[:,None])+curve*blend[:,None]
+        curve = np.clip(curve,np.min(pts,axis=0),np.max(pts,axis=0))
+        curve[:pinned_prefix+1] = straight[:pinned_prefix+1]
+        curve[-1] = p_end
+    kappa_max = min(MAX_PHYSICAL_CURVATURE, 1.0 / max(5.0, min_radius))
+    target_curvature = 0.95 * kappa_max  # Small margin for the final resampling.
+    for _ in range(400):
+        # Measure the geometry itself: the original arc lengths no longer match
+        # after relaxing a corner and can underestimate its actual curvature.
+        distances = np.maximum(np.linalg.norm(np.diff(curve, axis=0), axis=1), 1e-6)
+        arc = np.insert(np.cumsum(distances), 0, 0.0)
+        dx = np.gradient(curve[:, 0], arc)
+        dy = np.gradient(curve[:, 1], arc)
+        curvature = np.gradient(np.unwrap(np.arctan2(dy, dx)), arc)
+        tight = np.abs(curvature) > target_curvature
+        if not np.any(tight):
             break
-        sigma += 0.8
+        # Feather adjustments around tight stations, leaving distant sections
+        # alone instead of repeatedly blurring the entire drawing.
+        weight = np.minimum(1.0, 2.0 * gaussian_filter1d(tight.astype(float), sigma=2.0))
+        candidate = gaussian_filter1d(curve, sigma=1.2, axis=0, mode='nearest')
+        curve += weight[:, None] * (candidate - curve)
+        if pinned_prefix:
+            curve[:pinned_prefix+1] = straight[:pinned_prefix+1]
+        curve[0], curve[-1] = p0, p_end
 
-    return Path(cur_x, cur_y, ds=ds, constrain_curvature=True)
+    # This curve has already been smoothed. A second Path-level Gaussian pass
+    # would move its endpoints and soften it again.
+    return Path(curve[:, 0], curve[:, 1], ds=ds, constrain_curvature=True, smoothing_sigma=0.0)
 
 
 def generate_synthetic_path(

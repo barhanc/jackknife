@@ -172,6 +172,3 @@ class ControlTransformer(nn.Module):
             
             attn_weights = attn.cpu().numpy()[0] if attn is not None else np.ones(t_tok.shape[1]) / float(t_tok.shape[1])
             return steer_rad, attn_weights, probs
-
-# Backward-compatibility alias
-MultiTrailerPFN = ControlTransformer

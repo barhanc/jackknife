@@ -60,11 +60,11 @@ def train_model(
 
     best_val_acc = 0.0
 
+    train_dataset: Optional[ReversingDataset] = None
     # If not streaming, generate a single static training set
     if not stream:
         print(f"Generating static training set ({num_trajectories} trajectories)...")
         train_dataset = generator.generate_dataset(num_trajectories=num_trajectories, perturb_ratio=0.5)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
     metrics_history = []
     metrics_path = os.path.join(os.path.dirname(save_path) or ".", "training_metrics.json")
@@ -85,10 +85,12 @@ def train_model(
             # Dynamic streaming: sample fresh trajectories every epoch
             t_gen = time.time()
             train_dataset = generator.generate_dataset(num_trajectories=num_trajectories, perturb_ratio=0.5)
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
             gen_time = time.time() - t_gen
         else:
             gen_time = 0.0
+
+        assert train_dataset is not None
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
         model.train()
         train_loss = 0.0

@@ -9,10 +9,14 @@ from src.game import JackknifeGame25D
 from src.kinematics import TractorDoubleTrailerKinematics, VehicleDimensions, VehicleState
 
 
+class TimingGame(JackknifeGame25D):
+    policy_calls: int
+
+
 class GameTimingTests(unittest.TestCase):
     def make_game(self, multiplier=1, mode="AUTONOMOUS"):
         # Exercise controls, scheduling and real kinematics without a window/model.
-        game = JackknifeGame25D.__new__(JackknifeGame25D)
+        game = TimingGame.__new__(TimingGame)
         game.dims = VehicleDimensions()
         game.kinematics = TractorDoubleTrailerKinematics(game.dims)
         game.state = VehicleState()
@@ -56,7 +60,7 @@ class GameTimingTests(unittest.TestCase):
     def test_fast_forward_preserves_policy_and_trajectory(self):
         reference = self.make_game()
         self.advance(reference, 2.0, 120)
-        for multiplier in (8, 16):
+        for multiplier in (2, 4, 8, 16):
             with self.subTest(multiplier=multiplier):
                 game = self.make_game(multiplier)
                 self.advance(game, 2.0 / multiplier, 15)
@@ -78,7 +82,7 @@ class GameTimingTests(unittest.TestCase):
         reference = self.make_game(mode="MANUAL")
         self.advance(reference, 1.0, 50, keys)
         self.advance(reference, 1.0, 50)
-        for multiplier, frames in ((1, 30), (1, 144), (8, 15), (16, 15)):
+        for multiplier, frames in ((1, 30), (1, 144), (2, 15), (4, 15), (8, 15), (16, 15)):
             with self.subTest(multiplier=multiplier, frames=frames):
                 game = self.make_game(multiplier, "MANUAL")
                 self.advance(game, 1.0 / multiplier, frames, keys)

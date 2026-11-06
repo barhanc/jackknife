@@ -23,7 +23,11 @@ Run the simulation in autonomous mode (loads `models/model.pt` by default):
 uv run python main.py
 ```
 
-Run tests: `uv run python -m unittest discover -s tests -v`.
+Run tests:
+
+```bash
+uv run python -m unittest discover -s tests -v
+```
 
 Train the model:
 

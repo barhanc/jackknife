@@ -1,0 +1,47 @@
+name: Python CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: game-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
+      OMP_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: true
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install locked dependencies with CPU-only PyTorch
+        shell: bash
+        run: |
+          uv export --frozen --no-hashes --no-emit-project --prune torch --output-file "$RUNNER_TEMP/ci-requirements.txt"
+          uv export --frozen --no-hashes --no-emit-project --output-file "$RUNNER_TEMP/ci-constraints.txt"
+          uv venv --python 3.12
+          uv pip install --requirements "$RUNNER_TEMP/ci-requirements.txt" --constraint "$RUNNER_TEMP/ci-constraints.txt" --torch-backend cpu torch
+      - name: Type check
+        run: uv run --no-sync pyright
+      - name: Run tests
+        run: uv run --no-sync python -m unittest discover -s tests -v

@@ -13,6 +13,9 @@ os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
 from src.kinematics import TractorDoubleTrailerKinematics, VehicleDimensions, VehicleState
 from src.path_generator import Path, smooth_and_constrain_user_path, generate_synthetic_path
 from src.model import ControlTransformer
+from .hud import GameHUD
+from .depot import DepotTerrain
+from .lighting import TruckLighting
 
 # ==============================================================================
 # CLEAN 2.5D NIGHT DIORAMA PALETTE (Tactile Top-Down View)
@@ -44,10 +47,10 @@ COLOR_CAB_GLASS       = (18, 26, 38)       # Tinted dark glass windshield
 COLOR_CHROME          = (225, 230, 240)    # Grille & bumper
 COLOR_EXHAUST         = (185, 190, 200)
 
-COLOR_T1_ROOF         = (64, 100, 134)     # Lead Trailer: Nordic Slate Blue
-COLOR_T1_BEVEL        = (50, 80, 108)
-COLOR_T2_ROOF         = (68, 118, 88)      # Rear Trailer: Forest Sage Green
-COLOR_T2_BEVEL        = (52, 94, 68)
+COLOR_T1_ROOF         = (83, 131, 172)     # Lead trailer: fleet blue
+COLOR_T1_BEVEL        = (38, 66, 95)
+COLOR_T2_ROOF         = (87, 155, 140)     # Rear trailer: contrasting sea green
+COLOR_T2_BEVEL        = (38, 83, 76)
 COLOR_REEFER          = (218, 224, 232)    # Front refrigeration bulkhead unit
 
 COLOR_CHASSIS         = (28, 32, 40)       # Exposed rear deck
@@ -77,12 +80,13 @@ class TopDownCamera:
     Fixed 2D orthogonal top-down camera anchored to a permanent, fixed rectangular yard.
     Yard dimensions: 160.0m x 100.0m ([-80, +80] x [-50, +50] meters).
     Origin (0, 0) is permanently locked at the center of the viewport.
-    Guarantees 100% consistent physical scale and spatial intuition across all presets
+    Guarantees consistent physical scale and spatial intuition across all routes
     and user drawings without camera jump, shift, or zoom distortions.
     """
     def __init__(self, width: int, height: int, yard_w: float = 160.0, yard_h: float = 100.0):
         self.width = width
         self.height = height
+        self.viewport = pygame.Rect(0, 0, width, height)
         self.yard_w = yard_w
         self.yard_h = yard_h
         self.cx = 0.0
@@ -94,11 +98,16 @@ class TopDownCamera:
         # Scale is computed so the fixed physical rectangle fits with standard clean padding
         margin_x = 48.0
         margin_y = 48.0
-        scale_x = (self.width - margin_x) / self.yard_w
-        scale_y = (self.height - margin_y) / self.yard_h
+        scale_x = max(1.0, self.viewport.width - margin_x) / self.yard_w
+        scale_y = max(1.0, self.viewport.height - margin_y) / self.yard_h
         self.scale = min(scale_x, scale_y)
 
-    def fit_to_bounds(self, min_x: float = None, max_x: float = None, min_y: float = None, max_y: float = None, instant: bool = False):
+    def set_viewport(self, rect):
+        self.viewport = pygame.Rect(rect)
+        self.width, self.height = self.viewport.size
+        self.update_scale()
+
+    def fit_to_bounds(self, min_x: Optional[float] = None, max_x: Optional[float] = None, min_y: Optional[float] = None, max_y: Optional[float] = None, instant: bool = False):
         # Camera center is permanently locked to yard origin (0, 0)
         self.cx = 0.0
         self.cy = 0.0
@@ -116,13 +125,13 @@ class TopDownCamera:
         return 0.0
 
     def project(self, wx: float, wy: float, z: float = 0.0) -> Tuple[int, int]:
-        sx = int(self.width // 2 + (wx - self.cx) * self.scale)
-        sy = int(self.height // 2 - (wy - self.cy) * self.scale)
+        sx = int(self.viewport.centerx + (wx - self.cx) * self.scale)
+        sy = int(self.viewport.centery - (wy - self.cy) * self.scale)
         return sx, sy
 
     def unproject_ground(self, sx: int, sy: int) -> Tuple[float, float]:
-        wx = self.cx + (sx - self.width // 2) / self.scale
-        wy = self.cy + (self.height // 2 - sy) / self.scale
+        wx = self.cx + (sx - self.viewport.centerx) / self.scale
+        wy = self.cy + (self.viewport.centery - sy) / self.scale
         return wx, wy
 
 
@@ -132,7 +141,7 @@ class JackknifeGame25D:
         pygame.font.init()
         self.width, self.height = 1400, 900
         self.screen = pygame.display.set_mode((self.width, self.height), pygame.RESIZABLE | pygame.DOUBLEBUF)
-        pygame.display.set_caption("Multi-Trailer Reversing Simulation | Autonomous ControlTransformer")
+        pygame.display.set_caption("B-Double Truck Reversing Simulator")
         self.clock = pygame.time.Clock()
 
         # Dynamic Resolution-Responsive Typography (Scales crisp and readable from 1080p to 4K)
@@ -142,6 +151,8 @@ class JackknifeGame25D:
         self.dims = VehicleDimensions()
         self.kinematics = TractorDoubleTrailerKinematics(self.dims)
         self.camera = TopDownCamera(self.width, self.height, yard_w=160.0, yard_h=100.0)
+        self.terrain = DepotTerrain(self.camera.yard_w, self.camera.yard_h)
+        self.lighting = TruckLighting()
 
         # PyTorch Model
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -167,14 +178,13 @@ class JackknifeGame25D:
         self.current_speed = 0.0
         self.target_steer = 0.0
         self.current_path_idx = 0  # Monotonic curve arc-length tracker (handles 8-shapes and loops)
-        self.time_multiplier = 1   # Fast-forward simulation speed warp: 1x, 8x, 16x
-        self.speed_options = [1, 8, 16]
-        self.speed_btn_rect = pygame.Rect(0, 0, int(122 * self.ui_scale), int(30 * self.ui_scale))
-        self.sample_btn_rect = pygame.Rect(0, 0, int(144 * self.ui_scale), int(30 * self.ui_scale))
+        self.time_multiplier = 1   # Fast-forward simulation speed warp: 1x through 16x
+        self.speed_options = [1, 2, 4, 8, 16]
 
         # Drawing mode
         self.drawing_points: List[Tuple[float, float]] = []
         self.is_drawing = False
+        self.drawing_mode = False
 
         # Pre-allocated High-Performance Surfaces (Zero memory allocation in 4K render loop)
         self.background_surf: Optional[pygame.Surface] = None
@@ -184,17 +194,19 @@ class JackknifeGame25D:
 
         # Path & Procedural Yard
         self.path: Optional[Path] = None
-        self.preset_idx = 2
-        self.load_preset_path(self.preset_idx)
 
         # Telemetry & Atmosphere
         self.cross_track_err = 0.0
         self.inference_time_ms = 0.0
         self.attention_weights = np.ones(64) / 64.0
         self.action_probs = np.ones(15) / 15.0
-        self.show_help = True
-        self.show_rays = True
+        self.show_help = False
+        self.show_rays = False
         self.frame_count = 0
+        self.hud = GameHUD(self)
+        self.camera.set_viewport(self.hud.yard_rect)
+        self._build_vignette()
+        self.load_default_path()
 
     def _init_fonts(self):
         """
@@ -203,10 +215,15 @@ class JackknifeGame25D:
         """
         self.ui_scale = max(1.0, min(self.width / 1400.0, self.height / 900.0))
         s = self.ui_scale
-        font_dir = os.path.join(os.path.dirname(__file__), "..", "assets", "fonts")
+        font_dir = os.path.join(os.path.dirname(__file__), "assets", "fonts")
         sans_bold = os.path.join(font_dir, "DejaVuSans-Bold.ttf")
         mono = os.path.join(font_dir, "DejaVuSansMono.ttf")
         mono_bold = os.path.join(font_dir, "DejaVuSansMono-Bold.ttf")
+        arcade = os.path.join(font_dir, "PressStart2P-Regular.ttf")
+        self.font_arcade = pygame.font.Font(arcade, max(10, int(10 * s)))
+        self.font_arcade_small = pygame.font.Font(arcade, max(8, int(8 * s)))
+        self.font_arcade_title = pygame.font.Font(arcade, max(14, int(18 * s)))
+        self.font_arcade_alert = pygame.font.Font(arcade, max(16, int(24 * s)))
         self.font_big_alert = pygame.font.Font(sans_bold, max(18, int(34 * s)))
         self.font_big_sub   = pygame.font.Font(mono_bold, max(11, int(15 * s)))
         self.font_alert     = pygame.font.Font(sans_bold, max(14, int(22 * s)))
@@ -218,8 +235,8 @@ class JackknifeGame25D:
 
     def _build_vignette(self):
         self.vignette_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        diag = math.hypot(self.width, self.height)
-        center = (self.width // 2, self.height // 2)
+        diag = math.hypot(self.camera.viewport.width, self.camera.viewport.height)
+        center = self.camera.viewport.center
         for rad_frac, alpha in [(0.70, 35), (0.80, 80), (0.90, 140), (1.02, 210)]:
             r = int(diag * 0.5 * rad_frac)
             pygame.draw.circle(self.vignette_surf, (8, 10, 14, alpha), center, r, int(diag * 0.12))
@@ -243,78 +260,31 @@ class JackknifeGame25D:
         cy = (np.min(raw_y) + np.max(raw_y)) / 2.0
         return Path(np.array(raw_x) - cx, np.array(raw_y) - cy, ds=ds)
 
-    def load_preset_path(self, preset_id: int):
-        self.preset_idx = preset_id
-        if preset_id == 1:
-            # 90-Degree Standard Warehouse Alley Dock (68m, R >= 14m)
-            s = np.linspace(0.0, 68.0, 86)
-            curv = np.zeros_like(s)
-            t_mask = (s >= 16.0) & (s <= 38.0)
-            tau = (s[t_mask] - 16.0) / 22.0
-            curv[t_mask] = (math.pi / 2.0 / 22.0) * 2.0 * np.sin(np.pi * tau)**2
-            th = np.cumsum(curv * 0.8)
-            x = np.cumsum(np.cos(th) * 0.8)
-            y = np.cumsum(np.sin(th) * 0.8)
-            self.path = self._create_centered_path(x, y, ds=0.8)
-        elif preset_id == 2:
-            # S-Curve (95m)
-            s = np.linspace(0, 95.0, 120)
-            y = 6.5 * np.sin(s * 0.075)
-            self.path = self._create_centered_path(s, y, ds=0.8)
-        elif preset_id == 3:
-            # Diagonal "Z" Chicane Reversing Lane (128m)
-            # Starting at North-East -> Long diagonal approach -> Z-jog dogleg chicane -> Southwest dock
-            pts = [
-                (58.0,  31.5),
-                (42.0,  25.5),
-                (24.0,  19.0),
-                (8.0,   12.5),
-                (-4.0,   0.0),
-                (-18.0, -11.5),
-                (-36.0, -18.5),
-                (-56.0, -26.5)
-            ]
-            raw_path = smooth_and_constrain_user_path(pts, ds=0.8, min_radius=12.0)
-            self.path = self._create_centered_path(raw_path.x, raw_path.y, ds=0.8)
-        elif preset_id == 4:
-            # 90-Degree Hairpin Loading Bay
-            s = np.linspace(0, 70.0, 110)
-            th = np.clip(s * 0.024, 0.0, math.pi / 2.0)
-            x = np.cumsum(np.cos(th) * 0.8)
-            y = np.cumsum(np.sin(th) * 0.8)
-            self.path = self._create_centered_path(x, y, ds=0.8)
-        elif preset_id == 5:
-            # Extreme Precision Alley-Dock Gauntlet: Four Hard 90° Turns & Chicanes (162m)
-            # Replicates Preset [1]'s brutal R_peak = 7.0m alley-dock curvature across a multi-turn labyrinth:
-            # 1. Approach straight (16m) -> Hard 90° Right (R_peak = 7.0m)
-            # 2. Short transition (12m)  -> Hard 90° Left (R_peak = 7.0m, Chicane exit)
-            # 3. Intermediate straight (14m) -> Hard 90° Left (R_peak = 7.0m)
-            # 4. Short transition (12m)  -> Hard 90° Right (R_peak = 7.0m)
-            # 5. Final alley docking bay straight (18m)
-            ds = 0.8
-            def make_turn_curv(num_samples, angle_rad):
-                tau = np.linspace(0.0, 1.0, num_samples)
-                length = num_samples * ds
-                return (angle_rad / length) * 2.0 * np.sin(np.pi * tau)**2
+    def load_default_path(self):
+        """Four-turn alley-dock course (the former preset 5)."""
+        ds = 0.8
+        def make_turn_curv(num_samples, angle_rad):
+            tau = np.linspace(0.0, 1.0, num_samples)
+            length = num_samples * ds
+            return (angle_rad / length) * 2.0 * np.sin(np.pi * tau)**2
 
-            n_turn = int(round(22.0 / ds))
-            curv_parts = [
-                np.zeros(int(round(16.0 / ds))),
-                make_turn_curv(n_turn, math.pi / 2.0),
-                np.zeros(int(round(12.0 / ds))),
-                make_turn_curv(n_turn, -math.pi / 2.0),
-                np.zeros(int(round(14.0 / ds))),
-                make_turn_curv(n_turn, -math.pi / 2.0),
-                np.zeros(int(round(12.0 / ds))),
-                make_turn_curv(n_turn, math.pi / 2.0),
-                np.zeros(int(round(18.0 / ds)))
-            ]
-            all_curv = np.concatenate(curv_parts)
-            th = np.cumsum(all_curv * ds)
-            x = np.cumsum(np.cos(th) * ds)
-            y = np.cumsum(np.sin(th) * ds)
-            self.path = self._create_centered_path(x, y, ds=0.8)
-
+        n_turn = int(round(22.0 / ds))
+        curv_parts = [
+            np.zeros(int(round(16.0 / ds))),
+            make_turn_curv(n_turn, math.pi / 2.0),
+            np.zeros(int(round(12.0 / ds))),
+            make_turn_curv(n_turn, -math.pi / 2.0),
+            np.zeros(int(round(14.0 / ds))),
+            make_turn_curv(n_turn, -math.pi / 2.0),
+            np.zeros(int(round(12.0 / ds))),
+            make_turn_curv(n_turn, math.pi / 2.0),
+            np.zeros(int(round(18.0 / ds)))
+        ]
+        all_curv = np.concatenate(curv_parts)
+        th = np.cumsum(all_curv * ds)
+        x = np.cumsum(np.cos(th) * ds)
+        y = np.cumsum(np.sin(th) * ds)
+        self.path = self._create_centered_path(x, y, ds=0.8)
         self.generate_procedural_yard()
         self.reset_vehicle_to_path()
 
@@ -404,7 +374,6 @@ class JackknifeGame25D:
             # Strict clearance: stay within [-70, 70]m X and [-40, 40]m Y
             if (np.min(all_xs) >= -70.0 and np.max(all_xs) <= 70.0 and
                 np.min(all_ys) >= -40.0 and np.max(all_ys) <= 40.0):
-                self.preset_idx = 0
                 self.path = Path(centered_x, centered_y, ds=0.8, constrain_curvature=False)
                 print(f"Sampled random prior path: '{ptype}' (Length: {self.path.total_length:.1f}m, max_k={np.max(np.abs(self.path.curvatures)):.3f})")
                 self.generate_procedural_yard()
@@ -413,7 +382,6 @@ class JackknifeGame25D:
 
         # Fallback to guaranteed-safe centered S-curve if random proposals exceeded margins
         fallback = generate_synthetic_path(length_m=72.0, ds=0.8, max_curvature=0.08, path_type="multi_scale_s")
-        self.preset_idx = 0
         self.path = self._create_centered_path(fallback.x, fallback.y, ds=0.8)
         print("Sampled random prior path: 'multi_scale_s' (fallback)")
         self.generate_procedural_yard()
@@ -442,7 +410,12 @@ class JackknifeGame25D:
         self.steer_hold_time = 0.0
         self.has_arrived = False
         self.is_off_track = False
+        self.cross_track_err = 0.0
+        self.inference_time_ms = 0.0
+        self.attention_weights = np.ones(64) / 64.0
+        self.action_probs = np.ones(15) / 15.0
         self.auto_frame_camera(instant=True)
+        self.terrain.configure(self.path, self.kinematics, self.state)
         self.rebuild_static_background()
 
         # Seamlessly reload fresh best model if background training updated the checkpoint
@@ -464,8 +437,7 @@ class JackknifeGame25D:
 
     def rebuild_static_background(self):
         """
-        Pre-bakes the static environment (clean yard boundary, concrete pad, hazard curbs, and F1 track)
-        into a single persistent surface for maximum 60fps performance on 4K displays.
+        Bake the depot, route and loading bay once per path or viewport change.
         """
         if self.width <= 0 or self.height <= 0:
             return
@@ -473,12 +445,13 @@ class JackknifeGame25D:
         # contribute an unwanted alpha channel that breaks overlay compositing.
         self.background_surf = pygame.Surface((self.width, self.height), depth=32)
         self.draw_night_ground(self.background_surf)
-        self.draw_path_static(self.background_surf)
+        if not self.drawing_mode:
+            self.draw_path_static(self.background_surf)
         if self.vignette_surf is not None:
             self.background_surf.blit(self.vignette_surf, (0, 0))
 
     def generate_procedural_yard(self):
-        pass
+        self.terrain.invalidate()
 
     def update_controls(self, keys):
         """Apply held controls once per physics step, including during fast-forward."""
@@ -514,75 +487,107 @@ class JackknifeGame25D:
         elif self.mode == "AUTONOMOUS" or self.ai_save_active:
             self.current_speed = 0.0 if (self.has_arrived or self.is_off_track or self.is_paused) else -1.5
 
+    def update_hud_layout(self):
+        self.hud.layout()
+        self.camera.set_viewport(self.hud.yard_rect)
+        self._build_vignette()
+        self.rebuild_static_background()
+
+    def cycle_speed(self):
+        index = self.speed_options.index(self.time_multiplier)
+        self.time_multiplier = self.speed_options[(index + 1) % len(self.speed_options)]
+
+    def toggle_control_mode(self):
+        self.mode = "AUTONOMOUS" if self.mode == "MANUAL" else "MANUAL"
+        self.ai_save_active = False
+        self.steps_until_inference = 0
+        self.steer_hold_time = 0.0
+        if self.mode == "MANUAL":
+            self.has_arrived = False
+            self.is_off_track = False
+
+    def start_drawing_mode(self):
+        if self.drawing_mode:
+            return
+        self.drawing_mode = True
+        self.is_drawing = False
+        self.drawing_points = []
+        self.simulation_accumulator = 0.0
+        self.update_hud_layout()
+
+    def finish_drawing(self, cancel=False):
+        new_path = None
+        if not cancel and len(self.drawing_points) >= 4:
+            new_path = smooth_and_constrain_user_path(self.drawing_points, ds=0.8, lead_in_m=12.0)
+        self.drawing_mode = False
+        self.is_drawing = False
+        self.drawing_points = []
+        if new_path is not None:
+            self.path = new_path
+        self.update_hud_layout()
+        if new_path is not None:
+            self.generate_procedural_yard()
+            self.reset_vehicle_to_path()
+
+    def drawing_point(self, pos):
+        wx, wy = self.camera.unproject_ground(*pos)
+        half_w = self.camera.yard_w / 2.0 - 7.0
+        half_h = self.camera.yard_h / 2.0 - 7.0
+        return max(-half_w, min(half_w, wx)), max(-half_h, min(half_h, wy))
+
     def handle_input(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.is_running = False
+            elif event.type == pygame.MOUSEWHEEL:
+                if self.hud.drawer_rect.collidepoint(pygame.mouse.get_pos()):
+                    self.hud.scroll(event.y)
             elif event.type == pygame.VIDEORESIZE:
-                self.width, self.height = event.w, event.h
+                self.width, self.height = max(320, event.w), max(320, event.h)
                 self.screen = pygame.display.set_mode((self.width, self.height), pygame.RESIZABLE | pygame.DOUBLEBUF)
-                self.camera.width = self.width
-                self.camera.height = self.height
-                self.camera.update_scale()
                 self._init_fonts()
-                self._build_vignette()
                 self.dynamic_alpha_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-                self.auto_frame_camera(instant=True)
-                self.rebuild_static_background()
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1:
-                    if self.speed_btn_rect.collidepoint(event.pos):
-                        curr_idx = self.speed_options.index(self.time_multiplier)
-                        self.time_multiplier = self.speed_options[(curr_idx + 1) % len(self.speed_options)]
-                    elif self.sample_btn_rect.collidepoint(event.pos):
-                        self.sample_random_prior_path()
-                    else:
-                        self.is_drawing = True
-                        self.drawing_points = []
-                        wx, wy = self.camera.unproject_ground(*event.pos)
-                        half_w = self.camera.yard_w / 2.0 - 7.0
-                        half_h = self.camera.yard_h / 2.0 - 7.0
-                        wx = max(-half_w, min(half_w, wx))
-                        wy = max(-half_h, min(half_h, wy))
-                        self.drawing_points.append((wx, wy))
-            elif event.type == pygame.MOUSEMOTION:
-                if self.is_drawing:
-                    wx, wy = self.camera.unproject_ground(*event.pos)
-                    half_w = self.camera.yard_w / 2.0 - 7.0
-                    half_h = self.camera.yard_h / 2.0 - 7.0
-                    wx = max(-half_w, min(half_w, wx))
-                    wy = max(-half_h, min(half_h, wy))
-                    if len(self.drawing_points) > 0:
-                        lx, ly = self.drawing_points[-1]
-                        if math.hypot(wx - lx, wy - ly) > 0.5:
-                            self.drawing_points.append((wx, wy))
-            elif event.type == pygame.MOUSEBUTTONUP:
-                if event.button == 1 and self.is_drawing:
-                    self.is_drawing = False
-                    if len(self.drawing_points) >= 4:
-                        self.path = smooth_and_constrain_user_path(self.drawing_points, ds=0.8)
-                        self.generate_procedural_yard()
-                        self.reset_vehicle_to_path()
+                self.update_hud_layout()
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if self.hud.click(event.pos):
+                    continue
+                if not self.camera.viewport.collidepoint(event.pos):
+                    continue
+                wx, wy = self.camera.unproject_ground(*event.pos)
+                if abs(wx) > self.camera.yard_w/2 or abs(wy) > self.camera.yard_h/2:
+                    continue
+                self.start_drawing_mode()
+                self.is_drawing = True
+                self.drawing_points = [self.drawing_point(event.pos)]
+            elif event.type == pygame.MOUSEMOTION and self.is_drawing:
+                point = self.drawing_point(event.pos)
+                if math.hypot(point[0]-self.drawing_points[-1][0], point[1]-self.drawing_points[-1][1]) > 0.5:
+                    self.drawing_points.append(point)
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1 and self.is_drawing:
+                self.finish_drawing()
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_m:
-                    self.mode = "AUTONOMOUS" if self.mode == "MANUAL" else "MANUAL"
-                    self.ai_save_active = False
-                    if self.mode == "MANUAL":
-                        self.has_arrived = False
-                        self.is_off_track = False
+                if event.key == pygame.K_v:
+                    self.show_rays = not self.show_rays
+                    continue
+                if self.drawing_mode:
+                    if event.key == pygame.K_ESCAPE:
+                        self.finish_drawing(cancel=True)
+                    continue
+                if event.key == pygame.K_e:
+                    self.start_drawing_mode()
+                elif event.key == pygame.K_m:
+                    self.toggle_control_mode()
                 elif event.key == pygame.K_r:
                     self.reset_vehicle_to_path()
                 elif event.key == pygame.K_SPACE:
                     self.is_paused = not self.is_paused
                 elif event.key == pygame.K_t:
-                    curr_idx = self.speed_options.index(self.time_multiplier)
-                    self.time_multiplier = self.speed_options[(curr_idx + 1) % len(self.speed_options)]
+                    self.cycle_speed()
                 elif event.key == pygame.K_p:
                     self.sample_random_prior_path()
                 elif event.key == pygame.K_h:
                     self.show_help = not self.show_help
-                elif event.key in [pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5]:
-                    self.load_preset_path(event.key - pygame.K_0)
+                    self.update_hud_layout()
 
     def step_autonomous_policy(self):
         if not self.path:
@@ -630,7 +635,7 @@ class JackknifeGame25D:
             fy = self.state.y0 + self.dims.L0 * math.sin(self.state.theta0)
             cab_lat_err = abs(-(fx - self.path.x[0]) * math.sin(th0) + (fy - self.path.y[0]) * math.cos(th0))
 
-            if (self.mode == "AUTONOMOUS" or self.ai_save_active) and (self.cross_track_err > 5.5 or (self.current_path_idx <= 5 and cab_lat_err > 5.5)):
+            if self.cross_track_err > 5.5 or (self.current_path_idx <= 5 and cab_lat_err > 5.5):
                 self.is_off_track = True
                 self.current_speed = 0.0
                 return
@@ -671,365 +676,22 @@ class JackknifeGame25D:
     # ==========================================================================
 
     def draw_night_ground(self, surf: pygame.Surface):
-        # 1. Dark Nocturnal Void outside Yard Boundary
-        surf.fill(COLOR_NIGHT_BG)
-
-        yw, yh = self.camera.yard_w, self.camera.yard_h
-        half_w, half_h = yw / 2.0, yh / 2.0
-
-        # 2. Main Concrete Logistics Pad inside Yard (160m x 100m)
-        tl = self.camera.project(-half_w, half_h)
-        tr = self.camera.project(half_w, half_h)
-        br = self.camera.project(half_w, -half_h)
-        bl = self.camera.project(-half_w, -half_h)
-        yard_poly = [tl, tr, br, bl]
-        pygame.draw.polygon(surf, COLOR_YARD_PAD, yard_poly)
-
-        # 3. Heavy-Duty Concrete Slab Expansion Grid (16m x 16m panels)
-        grid_xs = np.arange(-half_w + 16.0, half_w, 16.0)
-        grid_ys = np.arange(-half_h + 16.0, half_h, 16.0)
-
-        for gx in grid_xs:
-            p1 = self.camera.project(gx, -half_h)
-            p2 = self.camera.project(gx, half_h)
-            pygame.draw.line(surf, COLOR_YARD_EXPANSION, p1, p2, 1)
-
-        for gy in grid_ys:
-            p1 = self.camera.project(-half_w, gy)
-            p2 = self.camera.project(half_w, gy)
-            pygame.draw.line(surf, COLOR_YARD_EXPANSION, p1, p2, 1)
-
-        # Expansion joint cross caps at slab intersections
-        for gx in grid_xs:
-            for gy in grid_ys:
-                pt = self.camera.project(gx, gy)
-                pygame.draw.circle(surf, (36, 46, 62), pt, 2)
-
-        # 4. Drainage Stormwater Trench Grates along inner perimeter sections
-        for drain_y in [-half_h + 3.0, half_h - 3.0]:
-            d_p1 = self.camera.project(-half_w + 6.0, drain_y)
-            d_p2 = self.camera.project(half_w - 6.0, drain_y)
-            pygame.draw.line(surf, COLOR_DRAIN_GRATE, d_p1, d_p2, 3)
-
-        # 5. HIGH-CONTRAST SAFETY HAZARD PERIMETER CURB (Unmistakable Yard Boundary!)
-        curb_w = 1.6
-        curb_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-
-        stripe_step = 2.4
-        for x_start in np.arange(-half_w, half_w, stripe_step):
-            x_end = x_start + stripe_step
-            p1 = self.camera.project(x_start, half_h)
-            p2 = self.camera.project(min(half_w, x_end), half_h)
-            p3 = self.camera.project(min(half_w, x_end - curb_w * 0.7), half_h - curb_w)
-            p4 = self.camera.project(max(-half_w, x_start - curb_w * 0.7), half_h - curb_w)
-            
-            is_yellow = (int(x_start / stripe_step) % 2 == 0)
-            col = COLOR_HAZARD_YELLOW if is_yellow else COLOR_HAZARD_BLACK
-            pygame.draw.polygon(curb_surf, col, [p1, p2, p3, p4])
-
-        for x_start in np.arange(-half_w, half_w, stripe_step):
-            if -12.0 <= x_start <= 10.0:
-                continue
-            x_end = x_start + stripe_step
-            p1 = self.camera.project(x_start, -half_h)
-            p2 = self.camera.project(min(half_w, x_end), -half_h)
-            p3 = self.camera.project(min(half_w, x_end + curb_w * 0.7), -half_h + curb_w)
-            p4 = self.camera.project(max(-half_w, x_start + curb_w * 0.7), -half_h + curb_w)
-            
-            is_yellow = (int(x_start / stripe_step) % 2 == 0)
-            col = COLOR_HAZARD_YELLOW if is_yellow else COLOR_HAZARD_BLACK
-            pygame.draw.polygon(curb_surf, col, [p1, p2, p3, p4])
-
-        for y_start in np.arange(-half_h, half_h, stripe_step):
-            y_end = y_start + stripe_step
-            p1 = self.camera.project(-half_w, y_start)
-            p2 = self.camera.project(-half_w, min(half_h, y_end))
-            p3 = self.camera.project(-half_w + curb_w, min(half_h, y_end - curb_w * 0.7))
-            p4 = self.camera.project(-half_w + curb_w, max(-half_h, y_start - curb_w * 0.7))
-            
-            is_yellow = (int(y_start / stripe_step) % 2 == 0)
-            col = COLOR_HAZARD_YELLOW if is_yellow else COLOR_HAZARD_BLACK
-            pygame.draw.polygon(curb_surf, col, [p1, p2, p3, p4])
-
-        for y_start in np.arange(-half_h, half_h, stripe_step):
-            y_end = y_start + stripe_step
-            p1 = self.camera.project(half_w, y_start)
-            p2 = self.camera.project(half_w, min(half_h, y_end))
-            p3 = self.camera.project(half_w - curb_w, min(half_h, y_end + curb_w * 0.7))
-            p4 = self.camera.project(half_w - curb_w, max(-half_h, y_start + curb_w * 0.7))
-            
-            is_yellow = (int(y_start / stripe_step) % 2 == 0)
-            col = COLOR_HAZARD_YELLOW if is_yellow else COLOR_HAZARD_BLACK
-            pygame.draw.polygon(curb_surf, col, [p1, p2, p3, p4])
-
-        inner_tl = self.camera.project(-half_w + curb_w, half_h - curb_w)
-        inner_tr = self.camera.project(half_w - curb_w, half_h - curb_w)
-        inner_br = self.camera.project(half_w - curb_w, -half_h + curb_w)
-        inner_bl = self.camera.project(-half_w + curb_w, -half_h + curb_w)
-        pygame.draw.polygon(curb_surf, (255, 220, 50, 240), [inner_tl, inner_tr, inner_br, inner_bl], 2)
-
-        surf.blit(curb_surf, (0, 0))
-
-        # 7. Heavy Outer Reinforced Security Retaining Wall & Fence Posts
-        wall_pts = [tl, tr, br, bl]
-        pygame.draw.polygon(surf, COLOR_PERIMETER_WALL, wall_pts, 3)
-
-        fence_offset = 1.0
-        f_tl = self.camera.project(-half_w - fence_offset, half_h + fence_offset)
-        f_tr = self.camera.project(half_w + fence_offset, half_h + fence_offset)
-        f_br = self.camera.project(half_w + fence_offset, -half_h - fence_offset)
-        f_bl = self.camera.project(-half_w - fence_offset, -half_h - fence_offset)
-        pygame.draw.polygon(surf, COLOR_PERIMETER_FENCE, [f_tl, f_tr, f_br, f_bl], 1)
-
-        for px in np.arange(-half_w - fence_offset, half_w + fence_offset + 1.0, 8.0):
-            pt_top = self.camera.project(px, half_h + fence_offset)
-            pt_bot = self.camera.project(px, -half_h - fence_offset)
-            pygame.draw.circle(surf, (160, 175, 195), pt_top, 2)
-            pygame.draw.circle(surf, (160, 175, 195), pt_bot, 2)
-        for py in np.arange(-half_h - fence_offset, half_h + fence_offset + 1.0, 8.0):
-            pt_left = self.camera.project(-half_w - fence_offset, py)
-            pt_right = self.camera.project(half_w + fence_offset, py)
-            pygame.draw.circle(surf, (160, 175, 195), pt_left, 2)
-            pygame.draw.circle(surf, (160, 175, 195), pt_right, 2)
-
-        # 8. Four Corner Fortified Security Towers with Illuminated Beacons
-        tower_size = 4.8
-        for tx, ty in [(-half_w, half_h), (half_w, half_h), (half_w, -half_h), (-half_w, -half_h)]:
-            base_p1 = self.camera.project(tx - tower_size / 2.0, ty + tower_size / 2.0)
-            base_p2 = self.camera.project(tx + tower_size / 2.0, ty + tower_size / 2.0)
-            base_p3 = self.camera.project(tx + tower_size / 2.0, ty - tower_size / 2.0)
-            base_p4 = self.camera.project(tx - tower_size / 2.0, ty - tower_size / 2.0)
-            pygame.draw.polygon(surf, (34, 44, 58), [base_p1, base_p2, base_p3, base_p4])
-            pygame.draw.polygon(surf, (62, 78, 102), [base_p1, base_p2, base_p3, base_p4], 2)
-
-            cab_size = 3.4
-            cab_p1 = self.camera.project(tx - cab_size / 2.0, ty + cab_size / 2.0)
-            cab_p2 = self.camera.project(tx + cab_size / 2.0, ty + cab_size / 2.0)
-            cab_p3 = self.camera.project(tx + cab_size / 2.0, ty - cab_size / 2.0)
-            cab_p4 = self.camera.project(tx - cab_size / 2.0, ty - cab_size / 2.0)
-            pygame.draw.polygon(surf, (45, 54, 68), [cab_p1, cab_p2, cab_p3, cab_p4])
-
-            win_size = 2.4
-            win_p1 = self.camera.project(tx - win_size / 2.0, ty + win_size / 2.0)
-            win_p2 = self.camera.project(tx + win_size / 2.0, ty + win_size / 2.0)
-            win_p3 = self.camera.project(tx + win_size / 2.0, ty - win_size / 2.0)
-            win_p4 = self.camera.project(tx - win_size / 2.0, ty - win_size / 2.0)
-            pygame.draw.polygon(surf, (255, 215, 85), [win_p1, win_p2, win_p3, win_p4], 1)
-
-            p_ctr = self.camera.project(tx, ty)
-            pygame.draw.circle(surf, (255, 65, 45), p_ctr, 4)
-            pygame.draw.circle(surf, (255, 220, 120), p_ctr, 2)
-
-        # 9. Main Depot Entrance Gate at South Perimeter
-        gh_w, gh_d = 3.6, 2.6
-        gh_p1 = self.camera.project(-gh_w / 2.0, -half_h + gh_d)
-        gh_p2 = self.camera.project( gh_w / 2.0, -half_h + gh_d)
-        gh_p3 = self.camera.project( gh_w / 2.0, -half_h)
-        gh_p4 = self.camera.project(-gh_w / 2.0, -half_h)
-        pygame.draw.polygon(surf, (38, 48, 64), [gh_p1, gh_p2, gh_p3, gh_p4])
-        pygame.draw.polygon(surf, (75, 95, 125), [gh_p1, gh_p2, gh_p3, gh_p4], 1)
-        
-        for arm_x0, arm_x1 in [(-11.0, -2.2), (2.2, 11.0)]:
-            b_p0 = self.camera.project(arm_x0, -half_h + 1.2)
-            b_p1 = self.camera.project(arm_x1, -half_h + 1.2)
-            pygame.draw.line(surf, (235, 45, 45), b_p0, b_p1, 3)
-            for bx in np.linspace(arm_x0, arm_x1, 6):
-                wp = self.camera.project(bx, -half_h + 1.2)
-                pygame.draw.circle(surf, (250, 250, 255), wp, 2)
-
+        self.terrain.draw_ground(surf, self.camera, self.font_mono_bold, editing=self.drawing_mode)
 
     def draw_path_static(self, surf: pygame.Surface):
-        if not self.path or len(self.path.x) < 2:
-            return
-
-        w_road = 3.8
-        w_curb = 4.8
-        N = len(self.path.x)
-
-        # 1. Road Surface (Plowed Dark Asphalt)
-        road_left = [self.camera.project(px - math.sin(pth) * w_road, py + math.cos(pth) * w_road)
-                     for px, py, pth in zip(self.path.x, self.path.y, self.path.headings)]
-        road_right = [self.camera.project(px + math.sin(pth) * w_road, py - math.cos(pth) * w_road)
-                      for px, py, pth in zip(self.path.x, self.path.y, self.path.headings)]
-
-        if len(road_left) >= 2:
-            road_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-            for i in range(N - 1):
-                quad = [road_left[i], road_left[i+1], road_right[i+1], road_right[i]]
-                pygame.draw.polygon(road_surf, (*COLOR_ROAD_SURF, 245), quad)
-            surf.blit(road_surf, (0, 0))
-
-            # 1b. Road Texture: Transverse Expansion Joints & Rubbered-In Tire Tracks
-            detail_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-            for i in range(0, N, max(1, int(14.0 / self.path.ds))):
-                jx, jy, jth = self.path.x[i], self.path.y[i], self.path.headings[i]
-                j_nx, j_ny = -math.sin(jth), math.cos(jth)
-                jp1 = self.camera.project(jx - j_nx * (w_road - 0.2), jy - j_ny * (w_road - 0.2))
-                jp2 = self.camera.project(jx + j_nx * (w_road - 0.2), jy + j_ny * (w_road - 0.2))
-                pygame.draw.line(detail_surf, (14, 18, 25, 110), jp1, jp2, 2)
-
-            tire_l = [self.camera.project(px - math.sin(pth) * 1.25, py + math.cos(pth) * 1.25)
-                      for px, py, pth in zip(self.path.x, self.path.y, self.path.headings)]
-            tire_r = [self.camera.project(px + math.sin(pth) * 1.25, py - math.cos(pth) * 1.25)
-                      for px, py, pth in zip(self.path.x, self.path.y, self.path.headings)]
-            if len(tire_l) >= 2:
-                pygame.draw.lines(detail_surf, (12, 16, 22, 100), False, tire_l, 4)
-                pygame.draw.lines(detail_surf, (12, 16, 22, 100), False, tire_r, 4)
-            surf.blit(detail_surf, (0, 0))
-
-        # 2. F1 Curbs (Red and White Alternating Blocks with Bevels)
-        curb_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        outer_left_pts = []
-        outer_right_pts = []
-
-        for i in range(N - 1):
-            x0, y0, th0 = self.path.x[i], self.path.y[i], self.path.headings[i]
-            x1, y1, th1 = self.path.x[i+1], self.path.y[i+1], self.path.headings[i+1]
-            s_val = self.path.s[i]
-
-            nx0, ny0 = -math.sin(th0), math.cos(th0)
-            nx1, ny1 = -math.sin(th1), math.cos(th1)
-
-            is_red = (int(s_val / 1.6) % 2 == 0)
-            curb_col = COLOR_F1_RED if is_red else COLOR_F1_WHITE
-            bevel_col = COLOR_F1_RED_DARK if is_red else COLOR_F1_WHITE_DARK
-
-            l_in0 = self.camera.project(x0 + nx0 * w_road, y0 + ny0 * w_road)
-            l_out0 = self.camera.project(x0 + nx0 * w_curb, y0 + ny0 * w_curb)
-            l_out1 = self.camera.project(x1 + nx1 * w_curb, y1 + ny1 * w_curb)
-            l_in1 = self.camera.project(x1 + nx1 * w_road, y1 + ny1 * w_road)
-
-            pygame.draw.polygon(curb_surf, (*curb_col, 250), [l_in0, l_out0, l_out1, l_in1])
-            pygame.draw.line(curb_surf, (*bevel_col, 255), l_out0, l_out1, 2)
-
-            r_in0 = self.camera.project(x0 - nx0 * w_road, y0 - ny0 * w_road)
-            r_out0 = self.camera.project(x0 - nx0 * w_curb, y0 - ny0 * w_curb)
-            r_out1 = self.camera.project(x1 - nx1 * w_curb, y1 - ny1 * w_curb)
-            r_in1 = self.camera.project(x1 - nx1 * w_road, y1 - ny1 * w_road)
-
-            pygame.draw.polygon(curb_surf, (*curb_col, 250), [r_in0, r_out0, r_out1, r_in1])
-            pygame.draw.line(curb_surf, (*bevel_col, 255), r_out0, r_out1, 2)
-
-            if i == 0:
-                outer_left_pts.append(l_out0)
-                outer_right_pts.append(r_out0)
-            outer_left_pts.append(l_out1)
-            outer_right_pts.append(r_out1)
-
-        surf.blit(curb_surf, (0, 0))
-
-        # 3. Track Boundary Lines
-        pygame.draw.lines(surf, COLOR_TRACK_LIMIT, False, road_left, 2)
-        pygame.draw.lines(surf, COLOR_TRACK_LIMIT, False, road_right, 2)
-
-        center_pts = [self.camera.project(px, py) for px, py in zip(self.path.x, self.path.y)]
-        pygame.draw.lines(surf, COLOR_PATH_CENTER, False, center_pts, 2)
-
-        # 4. Chequered Finish Band across entire track width (9.6m)
-        end_x, end_y = self.path.x[-1], self.path.y[-1]
-        end_th = self.path.headings[-1]
-        nx = -math.sin(end_th)
-        ny = math.cos(end_th)
-        tx = math.cos(end_th)
-        ty = math.sin(end_th)
-
-        band_depth = 1.4
-        num_checks_w = 12
-        num_checks_d = 2
-        dw = (2.0 * w_curb) / num_checks_w
-        dd = band_depth / num_checks_d
-
-        finish_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        for row in range(num_checks_d):
-            d0 = -band_depth + row * dd
-            d1 = d0 + dd
-            for col in range(num_checks_w):
-                w0 = -w_curb + col * dw
-                w1 = w0 + dw
-                is_white = ((row + col) % 2 == 0)
-                check_col = (245, 248, 255, 230) if is_white else (20, 24, 32, 230)
-
-                p1 = self.camera.project(end_x + nx * w0 + tx * d0, end_y + ny * w0 + ty * d0)
-                p2 = self.camera.project(end_x + nx * w1 + tx * d0, end_y + ny * w1 + ty * d0)
-                p3 = self.camera.project(end_x + nx * w1 + tx * d1, end_y + ny * w1 + ty * d1)
-                p4 = self.camera.project(end_x + nx * w0 + tx * d1, end_y + ny * w0 + ty * d1)
-                pygame.draw.polygon(finish_surf, check_col, [p1, p2, p3, p4])
-
-        surf.blit(finish_surf, (0, 0))
+        self.terrain.draw_route(surf, self.camera, self.path, self.font_mono_bold)
 
     def draw_dynamic_finish_line_glow(self):
-        if not self.path or len(self.path.x) < 2:
-            return
-        end_x, end_y = self.path.x[-1], self.path.y[-1]
-        end_th = self.path.headings[-1]
-        nx = -math.sin(end_th)
-        ny = math.cos(end_th)
-        w_curb = 4.8
-
-        left_end = self.camera.project(end_x + nx * w_curb, end_y + ny * w_curb)
-        right_end = self.camera.project(end_x - nx * w_curb, end_y - ny * w_curb)
-        glow_col = (60, 240, 145, 90) if self.has_arrived else (235, 45, 50, 70)
-        pygame.draw.line(self.dynamic_alpha_surf, glow_col, left_end, right_end, 10)
+        self.terrain.draw_dock_lights(self.dynamic_alpha_surf, self.camera, self.has_arrived, glow=True)
 
     def draw_dynamic_finish_line_core(self):
-        if not self.path or len(self.path.x) < 2:
-            return
-        end_x, end_y = self.path.x[-1], self.path.y[-1]
-        end_th = self.path.headings[-1]
-        nx = -math.sin(end_th)
-        ny = math.cos(end_th)
-        w_curb = 4.8
-
-        left_end = self.camera.project(end_x + nx * w_curb, end_y + ny * w_curb)
-        right_end = self.camera.project(end_x - nx * w_curb, end_y - ny * w_curb)
-        center_end = self.camera.project(end_x, end_y)
-
-        beam_col = COLOR_TARGET_GREEN if self.has_arrived else (235, 45, 50)
-        pygame.draw.line(self.screen, beam_col, left_end, right_end, 5)
-
-        for pylon_pos in [left_end, right_end]:
-            pygame.draw.circle(self.screen, (15, 18, 24), pylon_pos, 7)
-            pygame.draw.circle(self.screen, beam_col, pylon_pos, 5)
-            pygame.draw.circle(self.screen, (255, 255, 255), pylon_pos, 2)
-
-        pygame.draw.circle(self.screen, beam_col, center_end, 6)
-        pygame.draw.circle(self.screen, (255, 255, 255), center_end, 3)
+        self.terrain.draw_dock_lights(self.screen, self.camera, self.has_arrived)
 
     def draw_lighting(self):
-        # Volumetric headlights and taillight glows rendered directly to persistent dynamic_alpha_surf
-        light_surf = self.dynamic_alpha_surf
-
-        th0 = self.state.theta0
-        cos_t, sin_t = math.cos(th0), math.sin(th0)
-        fx = self.state.x0 + self.dims.L0 * cos_t
-        fy = self.state.y0 + self.dims.L0 * sin_t
-
-        beam_len = 13.5
-        hw = self.dims.cab_width * 0.44
-
-        b_l = (fx + 0.85 * cos_t - hw * sin_t, fy + 0.85 * sin_t + hw * cos_t)
-        b_r = (fx + 0.85 * cos_t + hw * sin_t, fy + 0.85 * sin_t - hw * cos_t)
-        spread_w = 4.0
-        f_l = (fx + (0.85 + beam_len) * cos_t - (hw + spread_w) * sin_t, fy + (0.85 + beam_len) * sin_t + (hw + spread_w) * cos_t)
-        f_r = (fx + (0.85 + beam_len) * cos_t + (hw + spread_w) * sin_t, fy + (0.85 + beam_len) * sin_t - (hw + spread_w) * cos_t)
-
-        pygame.draw.polygon(light_surf, (210, 235, 255, 12), [self.camera.project(*b_l), self.camera.project(*f_l), self.camera.project(*f_r), self.camera.project(*b_r)])
-        core_len = beam_len * 0.60
-        cf_l = (fx + (0.85 + core_len) * cos_t - (hw + spread_w*0.5) * sin_t, fy + (0.85 + core_len) * sin_t + (hw + spread_w*0.5) * cos_t)
-        cf_r = (fx + (0.85 + core_len) * cos_t + (hw + spread_w*0.5) * sin_t, fy + (0.85 + core_len) * sin_t - (hw + spread_w*0.5) * cos_t)
-        pygame.draw.polygon(light_surf, (230, 245, 255, 22), [self.camera.project(*b_l), self.camera.project(*cf_l), self.camera.project(*cf_r), self.camera.project(*b_r)])
-
-        pygame.draw.circle(light_surf, (255, 255, 240, 200), self.camera.project(*b_l), 2)
-        pygame.draw.circle(light_surf, (255, 255, 240, 200), self.camera.project(*b_r), 2)
-
-        x2, y2, th2 = self.kinematics.get_trailer2_axle(self.state)
-        for side in [-self.dims.trailer2_width * 0.44, self.dims.trailer2_width * 0.44]:
-            tl_x = x2 - 1.48 * math.cos(th2) - side * math.sin(th2)
-            tl_y = y2 - 1.48 * math.sin(th2) + side * math.cos(th2)
-            tl_p = self.camera.project(tl_x, tl_y)
-            pygame.draw.circle(light_surf, (235, 35, 45, 18), tl_p, 16)
-            pygame.draw.circle(light_surf, (255, 45, 55, 50), tl_p, 7)
-            pygame.draw.circle(light_surf, (255, 110, 120, 190), tl_p, 2)
+        self.lighting.draw_ground(
+            self.dynamic_alpha_surf, self.camera, self.state, self.dims,
+            self.kinematics.get_trailer2_axle(self.state), self.current_speed < -0.1,
+        )
 
     def draw_predictive_trajectories(self):
         if self.mode != "MANUAL" or self.is_off_track or self.has_arrived:
@@ -1091,8 +753,6 @@ class JackknifeGame25D:
                 alpha_core = int(norm_w * 135)
                 pygame.draw.line(ray_surf, (185, 235, 255, alpha_core), cab_emitter, st_s, 1)
 
-                disc_r = max(1, int(norm_w * 4))
-                pygame.draw.circle(ray_surf, (65, 195, 235, int(norm_w * 160)), st_s, disc_r)
 
     def draw_vehicle_shadows(self):
         x0, y0, th0 = self.state.x0, self.state.y0, self.state.theta0
@@ -1114,11 +774,11 @@ class JackknifeGame25D:
                 self.camera.project(cx + hl*ch + hw*sh, cy + hl*sh - hw*ch)
             ]
 
-        s_off = (4, 6)
+        s_off = (max(2, round(self.camera.scale * 0.35)), max(3, round(self.camera.scale * 0.55)))
         for cx, cy, th, l, w in [
             (x0 + 1.8 * cos_t0, y0 + 1.8 * sin_t0, th0, 5.3, dims.cab_width + 0.1),
-            (x1 + 3.0 * cos_t1, y1 + 3.0 * sin_t1, th1, 6.8, dims.trailer1_width),
-            (x2 + 2.5 * cos_t2, y2 + 2.5 * sin_t2, th2, 7.6, dims.trailer2_width)
+            (x0 - 1.85 * cos_t1, y0 - 1.85 * sin_t1, th1, 5.2, dims.trailer1_width),
+            (x2 + (dims.L2 - 3.0) * cos_t2, y2 + (dims.L2 - 3.0) * sin_t2, th2, 7.7, dims.trailer2_width)
         ]:
             poly = get_poly(cx, cy, th, l, w)
             s_poly = [(p[0] + s_off[0], p[1] + s_off[1]) for p in poly]
@@ -1126,13 +786,9 @@ class JackknifeGame25D:
 
     def draw_truck_and_trailers(self):
         """
-        Renders the multi-articulated vehicle matching the user's authentic top-down reference:
-        - Sculpted Freightliner aerodynamic yellow cab with tapered hood, curved fenders, grille, and headlights
-        - Curved tinted panoramic windshield with wipers
-        - Sleeper cab roof with aerodynamic highlight contours and rear collar fairings hugging the trailer
-        - Prominent aerodynamic side mirrors extending from A-pillars
-        - Clean architectural silver-white trailers with perimeter frames, corner brackets, and rear cargo doors
-        - Coiled pneumatic red/yellow air umbilicals
+        Render a raised amber tractor, short blue lead trailer with an exposed
+        fifth-wheel deck, and longer sea-green rear semi-trailer. All elevation
+        and shading are visual; axle locations and articulation stay physical.
         """
         x0, y0, th0 = self.state.x0, self.state.y0, self.state.theta0
         dims = self.dims
@@ -1153,6 +809,35 @@ class JackknifeGame25D:
                 self.camera.project(cx - hl*ch + hw*sh, cy - hl*sh - hw*ch),
                 self.camera.project(cx + hl*ch + hw*sh, cy + hl*sh - hw*ch)
             ]
+
+        def raised(points, height):
+            lift = max(1, round(height * self.camera.scale))
+            return [(x, y - lift) for x, y in points]
+
+        def draw_raised_body(points, roof, side, height):
+            top = raised(points, height)
+            # Fixed screen-space elevation keeps the lighting coherent as bodies rotate.
+            for i, start in enumerate(points):
+                j = (i + 1) % len(points)
+                end = points[j]
+                shade = 1.15 if end[0] > start[0] else 0.8
+                wall = tuple(min(255, round(c * shade)) for c in side)
+                pygame.draw.polygon(self.screen, wall, [start, end, top[j], top[i]])
+            pygame.draw.polygon(self.screen, roof, top)
+            pygame.draw.polygon(self.screen, side, top, 1)
+            return top
+
+        def draw_roof_details(cx, cy, heading, length, width, roof, height=0.48):
+            ch, sh = math.cos(heading), math.sin(heading)
+            def point(lx, ly):
+                return raised([self.camera.project(cx + lx*ch - ly*sh, cy + lx*sh + ly*ch)], height)[0]
+            rib = tuple(min(255, c + 20) for c in roof)
+            for lx in np.arange(-length/2 + 0.6, length/2 - 0.45, 0.9):
+                pygame.draw.line(self.screen, rib, point(lx, -width*0.35), point(lx, width*0.35), 1)
+            # Pale edge rails and an amber fleet stripe read clearly at yard scale.
+            for side in [-1, 1]:
+                pygame.draw.line(self.screen, (182, 207, 213), point(-length/2 + 0.15, side*width*0.43), point(length/2 - 0.4, side*width*0.43), 1)
+            pygame.draw.line(self.screen, COLOR_CAB_ROOF, point(-length/2 + 0.25, width*0.29), point(length/2 - 0.5, width*0.29), max(1, round(self.camera.scale*0.11)))
 
         # 2. Detailed 2D Wheels with Rims & Tires
         def draw_detailed_wheel(center_x, center_y, heading):
@@ -1275,8 +960,7 @@ class JackknifeGame25D:
             (-hl1,            hw1)
         ]
         t1_pts = [self.camera.project(t1_cx + lx*cos_t1 - ly*sin_t1, t1_cy + lx*sin_t1 + ly*cos_t1) for lx, ly in t1_corners_local]
-        pygame.draw.polygon(self.screen, (226, 229, 233), t1_pts)
-        pygame.draw.polygon(self.screen, (148, 156, 166), t1_pts, 2)
+        draw_raised_body(t1_pts, COLOR_T1_BEVEL, COLOR_T1_BEVEL, 0.48)
 
         t1_inner_corners = [
             (hl1 - chamfer1 - 0.08,  hw1 - 0.09),
@@ -1287,12 +971,14 @@ class JackknifeGame25D:
             (-hl1 + 0.09,            hw1 - 0.09)
         ]
         t1_inner_pts = [self.camera.project(t1_cx + lx*cos_t1 - ly*sin_t1, t1_cy + lx*sin_t1 + ly*cos_t1) for lx, ly in t1_inner_corners]
-        pygame.draw.polygon(self.screen, (235, 238, 242), t1_inner_pts)
-        pygame.draw.polygon(self.screen, (180, 186, 195), t1_inner_pts, 1)
+        t1_inner_pts = raised(t1_inner_pts, 0.48)
+        pygame.draw.polygon(self.screen, COLOR_T1_ROOF, t1_inner_pts)
+        draw_roof_details(t1_cx, t1_cy, th1, t1_box_l, dims.trailer1_width, COLOR_T1_ROOF)
 
         # Amber clearance lights on Trailer 1 front
         for side in [-hw1 + 0.15, hw1 - 0.15]:
             cl_p = self.camera.project(t1_cx + hl1*cos_t1 - side*sin_t1, t1_cy + hl1*sin_t1 + side*cos_t1)
+            cl_p = raised([cl_p], 0.48)[0]
             pygame.draw.circle(self.screen, (255, 180, 40), cl_p, 2)
 
         # Trailer 1 Rear Wall: Cargo Door frame line
@@ -1300,7 +986,8 @@ class JackknifeGame25D:
                                         t1_cy - hl1*sin_t1 + hw1*cos_t1)
         t1_rear_r = self.camera.project(t1_cx - hl1*cos_t1 + hw1*sin_t1,
                                         t1_cy - hl1*sin_t1 - hw1*cos_t1)
-        pygame.draw.line(self.screen, (130, 138, 148), t1_rear_l, t1_rear_r, 3)
+        start, end = raised([t1_rear_l, t1_rear_r], 0.48)
+        pygame.draw.line(self.screen, (174, 193, 207), start, end, 2)
 
         # E. Trailer 2: Rear Semi-Trailer with Under-Nose Bolster & Aerodynamic Chamfered Corners
         t2_l = 7.70
@@ -1330,8 +1017,7 @@ class JackknifeGame25D:
             (-hl2,            hw2)
         ]
         t2_pts = [self.camera.project(t2_cx + lx*ch2 - ly*sh2, t2_cy + lx*sh2 + ly*ch2) for lx, ly in t2_corners_local]
-        pygame.draw.polygon(self.screen, (226, 229, 233), t2_pts)
-        pygame.draw.polygon(self.screen, (148, 156, 166), t2_pts, 2)
+        draw_raised_body(t2_pts, COLOR_T2_BEVEL, COLOR_T2_BEVEL, 0.48)
 
         t2_inner_corners = [
             (hl2 - chamfer2 - 0.08,  hw2 - 0.09),
@@ -1342,30 +1028,35 @@ class JackknifeGame25D:
             (-hl2 + 0.09,            hw2 - 0.09)
         ]
         t2_inner_pts = [self.camera.project(t2_cx + lx*ch2 - ly*sh2, t2_cy + lx*sh2 + ly*ch2) for lx, ly in t2_inner_corners]
-        pygame.draw.polygon(self.screen, (235, 238, 242), t2_inner_pts)
-        pygame.draw.polygon(self.screen, (180, 186, 195), t2_inner_pts, 1)
+        t2_inner_pts = raised(t2_inner_pts, 0.48)
+        pygame.draw.polygon(self.screen, COLOR_T2_ROOF, t2_inner_pts)
+        draw_roof_details(t2_cx, t2_cy, th2, t2_l, dims.trailer2_width, COLOR_T2_ROOF)
 
         # Front Bulkhead Amber Clearance Lights on Trailer 2
         for side in [-hw2 + 0.15, hw2 - 0.15]:
             cl_p = self.camera.project(t2_cx + hl2*ch2 - side*sh2, t2_cy + hl2*sh2 + side*ch2)
+            cl_p = raised([cl_p], 0.48)[0]
             pygame.draw.circle(self.screen, (255, 180, 40), cl_p, 2)
 
         # Rear Cargo Doors: Split line and vertical lock rods
         t2_rear_s = self.camera.project(t2_cx - hl2*cos_t2, t2_cy - hl2*sin_t2)
         t2_rear_e = self.camera.project(t2_cx - (hl2 - 0.35)*cos_t2, t2_cy - (hl2 - 0.35)*sin_t2)
-        pygame.draw.line(self.screen, (130, 136, 145), t2_rear_s, t2_rear_e, 2)
+        start, end = raised([t2_rear_s, t2_rear_e], 0.48)
+        pygame.draw.line(self.screen, (174, 202, 195), start, end, 2)
 
         # Rear Bumper Bar & Taillights
         t2_bmp_poly = get_poly(t2_cx - (hl2 + 0.08)*cos_t2, t2_cy - (hl2 + 0.08)*sin_t2, th2, 0.16, dims.trailer2_width - 0.08)
         pygame.draw.polygon(self.screen, (40, 44, 52), t2_bmp_poly)
-        for side in [-dims.trailer2_width * 0.44, dims.trailer2_width * 0.44]:
-            tl_p = self.camera.project(t2_cx - (hl2 + 0.08)*cos_t2 - side*sin_t2,
-                                       t2_cy - (hl2 + 0.08)*sin_t2 + side*cos_t2)
-            pygame.draw.circle(self.screen, (255, 45, 55), tl_p, 3)
+        for point in self.lighting.taillights(self.state, dims, (x2, y2, th2)):
+            self.lighting.draw_lens(self.screen, self.camera, point, th2, (230, 40, 49), height=0.08)
+        for side in [-dims.trailer2_width * 0.27, dims.trailer2_width * 0.27]:
+            offset = dims.L2 + 0.85 - 7.7 - 0.08
+            point = (x2 + offset*cos_t2 - side*sin_t2, y2 + offset*sin_t2 + side*cos_t2)
+            color = (225, 235, 213) if self.current_speed < -0.1 else (50, 59, 63)
+            self.lighting.draw_lens(self.screen, self.camera, point, th2, color, height=0.08)
 
         # ---------------------------------------------------------------------
-        # G. TRACTOR CAB: EXACT REPLICA OF USER'S FREIGHTLINER REFERENCE
-        # Color: Warm Golden Amber (248, 178, 48) with sculpted aerodynamic contours
+        # G. Warm amber tractor, with a raised sleeper roof above the lower hood.
         # ---------------------------------------------------------------------
         cab_cx = x0 + 1.80 * cos_t0
         cab_cy = y0 + 1.80 * sin_t0
@@ -1388,11 +1079,11 @@ class JackknifeGame25D:
 
         # 3. Main Sleeper Cabin Roof (Sculpted aerodynamic yellow body)
         cab_poly = get_poly(cab_cx, cab_cy, th0, 1.95, dims.cab_width)
-        pygame.draw.polygon(self.screen, (248, 178, 48), cab_poly)
-        pygame.draw.polygon(self.screen, (198, 138, 32), cab_poly, 2)
+        draw_raised_body(cab_poly, COLOR_CAB_ROOF, (147, 87, 26), 0.32)
 
         # Aerodynamic Roof Contours (The raised center ridge & side flow ridges from reference)
         r_center_poly = get_poly(cab_cx - 0.10 * cos_t0, cab_cy - 0.10 * sin_t0, th0, 1.35, dims.cab_width * 0.36)
+        r_center_poly = raised(r_center_poly, 0.32)
         pygame.draw.polygon(self.screen, (255, 195, 80), r_center_poly)
         pygame.draw.polygon(self.screen, (225, 155, 38), r_center_poly, 1)
 
@@ -1400,7 +1091,8 @@ class JackknifeGame25D:
         for r_side in [-dims.cab_width * 0.32, dims.cab_width * 0.32]:
             p_s = self.camera.project(cab_cx + 0.80 * cos_t0 - r_side * sin_t0, cab_cy + 0.80 * sin_t0 + r_side * cos_t0)
             p_e = self.camera.project(cab_cx - 0.80 * cos_t0 - r_side * sin_t0, cab_cy - 0.80 * sin_t0 + r_side * cos_t0)
-            pygame.draw.line(self.screen, (215, 148, 35), p_s, p_e, 2)
+            start, end = raised([p_s, p_e], 0.32)
+            pygame.draw.line(self.screen, COLOR_CAB_BEVEL, start, end, 1)
 
         # 4. Panoramic Curved Front Windshield & Wipers
         ws_cx = x0 + 2.72 * cos_t0
@@ -1412,14 +1104,16 @@ class JackknifeGame25D:
             self.camera.project(ws_cx - 0.16*cos_t0 + ws_hw*sin_t0, ws_cy - 0.16*sin_t0 - ws_hw*cos_t0),
             self.camera.project(ws_cx + 0.20*cos_t0 + (ws_hw - 0.15)*sin_t0, ws_cy + 0.20*sin_t0 - (ws_hw - 0.15)*cos_t0)
         ]
-        pygame.draw.polygon(self.screen, (26, 34, 46), ws_poly)
+        ws_poly = raised(ws_poly, 0.32)
+        pygame.draw.polygon(self.screen, (38, 65, 82), ws_poly)
         pygame.draw.polygon(self.screen, (14, 18, 26), ws_poly, 1)
 
         # Dual Windshield Wipers parked at bottom edge
         for w_side in [-0.42, 0.42]:
             wp_s = self.camera.project(ws_cx - 0.12*cos_t0 - w_side*sin_t0, ws_cy - 0.12*sin_t0 + w_side*cos_t0)
             wp_e = self.camera.project(ws_cx + 0.12*cos_t0 - (w_side + 0.25)*sin_t0, ws_cy + 0.12*sin_t0 + (w_side + 0.25)*cos_t0)
-            pygame.draw.line(self.screen, (10, 12, 16), wp_s, wp_e, 2)
+            start, end = raised([wp_s, wp_e], 0.32)
+            pygame.draw.line(self.screen, (10, 12, 16), start, end, 1)
 
         # 5. Aerodynamic Tapered Front Hood
         hood_cx = x0 + 3.65 * cos_t0
@@ -1435,8 +1129,7 @@ class JackknifeGame25D:
 
         hood_poly = [self.camera.project(*h_rear_l), self.camera.project(*h_rear_r),
                      self.camera.project(*h_front_r), self.camera.project(*h_front_l)]
-        pygame.draw.polygon(self.screen, (248, 178, 48), hood_poly)
-        pygame.draw.polygon(self.screen, (198, 138, 32), hood_poly, 2)
+        draw_raised_body(hood_poly, COLOR_CAB_HOOD, (147, 87, 26), 0.14)
 
         # Hood Center Crease Line
         hc_s = self.camera.project(hood_cx - 0.75 * cos_t0, hood_cy - 0.75 * sin_t0)
@@ -1449,17 +1142,6 @@ class JackknifeGame25D:
             f_m = self.camera.project(hood_cx + 0.10 * cos_t0 - (f_side * 1.05) * sin_t0, hood_cy + 0.10 * sin_t0 + (f_side * 1.05) * cos_t0)
             f_e = self.camera.project(hood_cx + 0.78 * cos_t0 - (f_side * 0.85) * sin_t0, hood_cy + 0.78 * sin_t0 + (f_side * 0.85) * cos_t0)
             pygame.draw.lines(self.screen, (215, 148, 35), False, [f_s, f_m, f_e], 2)
-
-        # 6. Aerodynamic Headlight Assemblies at Front Fender Corners (Clear lenses with amber markers)
-        for side in [-hood_w_front * 0.46, hood_w_front * 0.46]:
-            hl_cx = hood_cx + 0.80 * cos_t0 - side * sin_t0
-            hl_cy = hood_cy + 0.80 * sin_t0 + side * cos_t0
-            hl_poly = get_poly(hl_cx, hl_cy, th0, 0.28, 0.26)
-            pygame.draw.polygon(self.screen, (230, 242, 255), hl_poly)
-            pygame.draw.polygon(self.screen, (70, 75, 85), hl_poly, 1)
-            amb_p = self.camera.project(hl_cx - 0.05 * cos_t0 - (side * 0.08) * sin_t0,
-                                        hl_cy - 0.05 * sin_t0 + (side * 0.08) * cos_t0)
-            pygame.draw.circle(self.screen, (255, 175, 30), amb_p, 2)
 
         # 7. Chrome Front Grille Inset at Nose
         grille_cx = hood_cx + 0.88 * cos_t0
@@ -1500,274 +1182,21 @@ class JackknifeGame25D:
             draw_detailed_wheel(wx, wy, steer_th)
 
 
+        # Lens housings sit above the fenders and lower bumper, matching the
+        # ground-light emitter positions rather than floating ahead of the cab.
+        for point in self.lighting.headlights(self.state, dims):
+            self.lighting.draw_lens(self.screen, self.camera, point, th0, (250, 242, 218), height=0.14)
+
     # ==========================================================================
     # THEMATIC FROSTED GLASS HUD WITH REFINED DISTRIBUTION PLOT
     # ==========================================================================
 
-    def draw_top_hud(self):
-        s = self.ui_scale
-        pad, gap = int(12 * s), int(12 * s)
-        row_h, button_h = int(40 * s), int(36 * s)
-        gear = "REVERSE" if self.current_speed < -0.1 else ("FORWARD" if self.current_speed > 0.1 else "PARKED")
-        gear_text = self.font_mono_bold.render(gear, True, COLOR_ACCENT_AMBER)
-        speed_text = self.font_mono_bold.render(f"SPEED {self.time_multiplier}x", True, COLOR_ACCENT_CYAN)
-        sample_text = self.font_mono_bold.render("SAMPLE PATH", True, COLOR_TEXT_WHITE)
-        key_w = max(self.font_sm.size("T")[0], self.font_sm.size("P")[0]) + int(12 * s)
-
-        # Measure contents instead of relying on font-specific pixel offsets.
-        gear_w = self.font_mono_bold.size("REVERSE")[0] + 2 * pad
-        velocity = f"{self.current_speed:+.1f} m/s"
-        latency = f"{self.inference_time_ms:.1f} ms"
-        velocity_w = max(self.font_mono.size(velocity)[0], self.font_mono.size("+2.0 m/s")[0])
-        latency_w = max(self.font_mono.size(latency)[0], self.font_sm.size("INFERENCE")[0])
-        speed_w = self.font_mono_bold.size("SPEED 16x")[0] + key_w + 3 * pad
-        sample_w = sample_text.get_width() + key_w + 3 * pad
-        widths = [gear_w, velocity_w, latency_w, speed_w, sample_w]
-        bar_w = min(sum(widths) + 4 * gap + 2 * pad, max(1, self.width - 2 * pad))
-        rects = []
-        x, y = pad, pad
-        for width in widths:
-            if x > pad and x + width > bar_w - pad:
-                x, y = pad, y + row_h + gap
-            rects.append(pygame.Rect(x, y, width, row_h))
-            x += width + gap
-        bar_h = y + row_h + pad
-        bar_x = (self.width - bar_w) // 2
-        help_left = self.width - int(270 * s)
-        if self.show_help and help_left - gap - bar_w >= pad:
-            bar_x = min(bar_x, help_left - gap - bar_w)
-        self.top_hud_rect = pygame.Rect(bar_x, int(20 * s), bar_w, bar_h)
-        bar = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
-        pygame.draw.rect(bar, COLOR_HUD_BG, bar.get_rect(), border_radius=int(12 * s))
-        pygame.draw.rect(bar, COLOR_HUD_BORDER, bar.get_rect(), 1, border_radius=int(12 * s))
-
-        badge = rects[0].inflate(0, -int(10 * s))
-        pygame.draw.rect(bar, (54, 39, 23), badge, border_radius=int(6 * s))
-        bar.blit(gear_text, gear_text.get_rect(center=badge.center))
-        for rect, label, value in [(rects[1], "VELOCITY", velocity), (rects[2], "INFERENCE", latency)]:
-            heading = self.font_sm.render(label, True, COLOR_TEXT_DIM)
-            text = self.font_mono.render(value, True, COLOR_TEXT_WHITE)
-            bar.blit(heading, heading.get_rect(midtop=(rect.centerx, rect.top)))
-            bar.blit(text, text.get_rect(midbottom=(rect.centerx, rect.bottom)))
-
-        mouse = pygame.mouse.get_pos()
-        for rect, text, shortcut, attr, accent in [
-            (rects[3], speed_text, "T", "speed_btn_rect", COLOR_ACCENT_CYAN),
-            (rects[4], sample_text, "P", "sample_btn_rect", COLOR_ACCENT_AMBER),
-        ]:
-            button = pygame.Rect(rect.x, rect.centery - button_h // 2, rect.w, button_h)
-            hitbox = button.move(self.top_hud_rect.topleft)
-            setattr(self, attr, hitbox)
-            hover = hitbox.collidepoint(mouse)
-            pygame.draw.rect(bar, (35, 49, 66) if hover else (23, 33, 46), button, border_radius=int(7 * s))
-            pygame.draw.rect(bar, accent if hover else (57, 75, 97), button, 1, border_radius=int(7 * s))
-            key_rect = pygame.Rect(button.right - pad - key_w, button.centery - int(10 * s), key_w, int(20 * s))
-            pygame.draw.rect(bar, (12, 19, 29), key_rect, border_radius=int(4 * s))
-            key = self.font_sm.render(shortcut, True, COLOR_TEXT_DIM)
-            bar.blit(key, key.get_rect(center=key_rect.center))
-            text_area = pygame.Rect(button.left + pad, button.top, key_rect.left - button.left - 2 * pad, button.h)
-            bar.blit(text, text.get_rect(center=text_area.center))
-        self.screen.blit(bar, self.top_hud_rect)
-
     def draw_hud(self):
-        s = self.ui_scale
-        self.draw_top_hud()
-
-        # 2. Sleek Simplified Stability Margin Card (Lower Right Corner)
-        sm_w, sm_h = int(240 * s), int(64 * s)
-        sm_surf = pygame.Surface((sm_w, sm_h), pygame.SRCALPHA)
-        pygame.draw.rect(sm_surf, COLOR_HUD_BG, (0, 0, sm_w, sm_h), border_radius=int(10 * s))
-        pygame.draw.rect(sm_surf, COLOR_HUD_BORDER, (0, 0, sm_w, sm_h), 1, border_radius=int(10 * s))
-
-        pad_x = int(14 * s)
-        meter_w = sm_w - 2 * pad_x
-
-        rho = self.kinematics.jackknife_proximity(self.state)
-        is_jk = self.kinematics.is_jackknifed(self.state)
-        stab_str = "JACKKNIFED" if is_jk else f"{rho * 100:.0f}%"
-        stab_col = COLOR_TARGET_GREEN if rho > 0.45 else (COLOR_ACCENT_AMBER if rho > 0.20 else (225, 55, 60))
-
-        sm_surf.blit(self.font_title.render("STABILITY MARGIN", True, COLOR_TEXT_DIM), (pad_x, int(10 * s)))
-        stab_txt = self.font_mono_bold.render(stab_str, True, stab_col)
-        sm_surf.blit(stab_txt, (sm_w - pad_x - stab_txt.get_width(), int(10 * s)))
-
-        meter_y, meter_h = int(34 * s), max(5, int(9 * s))
-        pygame.draw.rect(sm_surf, (24, 30, 40), (pad_x, meter_y, meter_w, meter_h), border_radius=int(4 * s))
-        fill_w = int(meter_w * rho)
-        if fill_w > 0:
-            pygame.draw.rect(sm_surf, stab_col, (pad_x, meter_y, fill_w, meter_h), border_radius=int(4 * s))
-
-        self.screen.blit(sm_surf, (self.width - sm_w - int(20 * s), self.height - sm_h - int(24 * s)))
-
-        # 3. Refined Bottom-Left Steering Distribution Plot Card (Clean, strictly bounded)
-        p_w, p_h = int(360 * s), int(132 * s)
-        p_surf = pygame.Surface((p_w, p_h), pygame.SRCALPHA)
-        pygame.draw.rect(p_surf, COLOR_HUD_BG, (0, 0, p_w, p_h), border_radius=int(12 * s))
-        pygame.draw.rect(p_surf, COLOR_HUD_BORDER, (0, 0, p_w, p_h), 1, border_radius=int(12 * s))
-
-        chart_x = pad_x
-        chart_y = int(42 * s)
-        chart_w = p_w - 2 * pad_x
-        chart_h = int(54 * s)
-
-        if self.mode == "AUTONOMOUS" or self.ai_save_active:
-            angles_deg = np.linspace(-35, 35, 15)
-            probs = self.action_probs
-            num_bins = len(probs)
-            bar_width = int(chart_w / num_bins) - 3
-
-            pygame.draw.line(p_surf, (35, 45, 60), (chart_x, chart_y + chart_h), (chart_x + chart_w, chart_y + chart_h), 1)
-
-            peak_bin = int(np.argmax(probs))
-            expected_deg = float(np.sum(probs * angles_deg))
-            max_p = max(0.20, float(np.max(probs)))
-
-            p_surf.blit(self.font_title.render("STEERING DISTRIBUTION", True, COLOR_TEXT_WHITE), (pad_x, int(12 * s)))
-            exp_txt = self.font_mono_bold.render(f"E[φ]={expected_deg:+.1f}°", True, COLOR_STATUS_GREEN)
-            p_surf.blit(exp_txt, (p_w - pad_x - exp_txt.get_width(), int(12 * s)))
-
-            for b in range(num_bins):
-                bx = chart_x + b * (bar_width + 3)
-                b_prob = float(probs[b])
-                bh = max(2, min(chart_h - 4, int((b_prob / max_p) * (chart_h - 8))))
-                by = chart_y + chart_h - bh
-
-                if b == peak_bin:
-                    pygame.draw.rect(p_surf, COLOR_ACCENT_CYAN, (bx, by, bar_width, bh), border_radius=int(2 * s))
-                    pygame.draw.rect(p_surf, (185, 235, 255), (bx, by, bar_width, bh), 1, border_radius=int(2 * s))
-                else:
-                    b_col = (48, 76, 108) if b_prob > 0.05 else (28, 42, 60)
-                    pygame.draw.rect(p_surf, b_col, (bx, by, bar_width, bh), border_radius=int(2 * s))
-
-            needle_frac = (expected_deg - (-35.0)) / 70.0
-            needle_x = chart_x + int(needle_frac * chart_w)
-            needle_x = max(chart_x, min(chart_x + chart_w, needle_x))
-            pygame.draw.line(p_surf, COLOR_STATUS_GREEN, (needle_x, chart_y + 4), (needle_x, chart_y + chart_h + 2), 2)
-            pygame.draw.circle(p_surf, COLOR_STATUS_GREEN, (needle_x, chart_y + 4), max(2, int(3 * s)))
-        else:
-            p_surf.blit(self.font_title.render("MANUAL STEERING", True, COLOR_TEXT_WHITE), (pad_x, int(12 * s)))
-
-            pygame.draw.rect(p_surf, (22, 28, 38), (chart_x, chart_y + int(14 * s), chart_w, int(20 * s)), border_radius=int(6 * s))
-            pygame.draw.line(p_surf, (55, 70, 90), (chart_x + chart_w//2, chart_y + int(10 * s)), (chart_x + chart_w//2, chart_y + int(38 * s)), 2)
-
-            steer_deg = math.degrees(self.state.phi)
-            s_frac = (steer_deg - (-35.0)) / 70.0
-            sx = chart_x + int(s_frac * chart_w)
-            sx = max(chart_x + 4, min(chart_x + chart_w - 4, sx))
-            pygame.draw.circle(p_surf, COLOR_ACCENT_AMBER, (sx, chart_y + int(24 * s)), max(4, int(7 * s)))
-            pygame.draw.circle(p_surf, (255, 255, 255), (sx, chart_y + int(24 * s)), max(2, int(2 * s)))
-
-            sw_cx, sw_cy, sw_r = p_w - int(120 * s), int(20 * s), int(11 * s)
-            pygame.draw.circle(p_surf, (45, 55, 72), (sw_cx, sw_cy), sw_r, 2)
-            pygame.draw.circle(p_surf, (70, 85, 110), (sw_cx, sw_cy), max(2, int(3 * s)))
-            wheel_rot = -self.state.phi * 2.2
-            for spoke_ang in [wheel_rot, wheel_rot + 2.1, wheel_rot - 2.1]:
-                sp_x = sw_cx + (sw_r - 2) * math.sin(spoke_ang)
-                sp_y = sw_cy - (sw_r - 2) * math.cos(spoke_ang)
-                pygame.draw.line(p_surf, (160, 180, 205), (sw_cx, sw_cy), (int(sp_x), int(sp_y)), 2)
-            top_x = sw_cx + (sw_r) * math.sin(wheel_rot)
-            top_y = sw_cy - (sw_r) * math.cos(wheel_rot)
-            pygame.draw.circle(p_surf, COLOR_ACCENT_AMBER, (int(top_x), int(top_y)), max(2, int(2 * s)))
-
-            m_txt = self.font_mono_bold.render(f"φ={steer_deg:+.1f}°", True, COLOR_ACCENT_AMBER)
-            p_surf.blit(m_txt, (p_w - pad_x - m_txt.get_width(), int(12 * s)))
-
-        # Clean Axis Labels
-        p_surf.blit(self.font_sm.render("-35°", True, COLOR_TEXT_DIM), (chart_x, chart_y + chart_h + int(5 * s)))
-        lbl_0 = self.font_sm.render("0°", True, COLOR_TEXT_DIM)
-        p_surf.blit(lbl_0, (chart_x + chart_w // 2 - lbl_0.get_width() // 2, chart_y + chart_h + int(5 * s)))
-        lbl_p35 = self.font_sm.render("+35°", True, COLOR_TEXT_DIM)
-        p_surf.blit(lbl_p35, (chart_x + chart_w - lbl_p35.get_width(), chart_y + chart_h + int(5 * s)))
-
-        self.screen.blit(p_surf, (int(24 * s), self.height - p_h - int(24 * s)))
-
-        # 4. Right Controls Card (Compact, perfectly fitting within boundary)
-        if self.show_help:
-            h_w, h_h = int(250 * s), int(238 * s)
-            h_surf = pygame.Surface((h_w, h_h), pygame.SRCALPHA)
-            pygame.draw.rect(h_surf, COLOR_HUD_BG, (0, 0, h_w, h_h), border_radius=int(10 * s))
-            pygame.draw.rect(h_surf, COLOR_HUD_BORDER, (0, 0, h_w, h_h), 1, border_radius=int(10 * s))
-
-            h_surf.blit(self.font_title.render("CONTROLS", True, COLOR_TEXT_WHITE), (int(14 * s), int(12 * s)))
-
-            controls = [
-                ("[W / S]", "Gas / Reverse"),
-                ("[A / D]", "Manual Steer"),
-                ("[M]", "Auto / Manual"),
-                ("[T]", "Speed 1x/8x/16x"),
-                ("[P]", "Sample Prior"),
-                ("[Space]", "Pause / Resume"),
-                ("[R]", "Reset to Start"),
-                ("[1 - 5]", "Preset Tracks"),
-                ("[L-Drag]", "Draw on Yard"),
-            ]
-
-            line_h = int(21 * s)
-            desc_x = int(92 * s)
-            for i, (k_tag, desc) in enumerate(controls):
-                h_surf.blit(self.font_mono_bold.render(k_tag, True, COLOR_ACCENT_AMBER), (int(14 * s), int(34 * s) + i * line_h))
-                h_surf.blit(self.font_mono.render(desc, True, COLOR_TEXT_DIM), (desc_x, int(34 * s) + i * line_h))
-
-            help_rect = pygame.Rect(self.width - h_w - int(20 * s), int(20 * s), h_w, h_h)
-            if help_rect.colliderect(self.top_hud_rect):
-                help_rect.top = self.top_hud_rect.bottom + int(12 * s)
-            self.screen.blit(h_surf, help_rect)
-
-        # 5. Drawing & Prominent Center Messages
-        if self.is_drawing:
-            msg = self.font_mono_bold.render("DRAWING PATH... (Physical R >= 10.0m)", True, COLOR_ACCENT_CYAN)
-            self.screen.blit(msg, (self.width // 2 - msg.get_width() // 2, int(45 * s)))
-        elif self.has_arrived:
-            banner_w, banner_h = int(490 * s), int(100 * s)
-            banner_surf = pygame.Surface((banner_w, banner_h), pygame.SRCALPHA)
-            pygame.draw.rect(banner_surf, (12, 34, 22, 245), (0, 0, banner_w, banner_h), border_radius=int(14 * s))
-            pygame.draw.rect(banner_surf, (45, 225, 125), (0, 0, banner_w, banner_h), 2, border_radius=int(14 * s))
-            msg = self.font_big_alert.render("DOCK SECURED", True, (45, 225, 125))
-            sub = self.font_big_sub.render("PRESS [M] TO DRIVE FORWARD · [R] RESTART", True, (215, 245, 225))
-            banner_surf.blit(msg, (banner_w // 2 - msg.get_width() // 2, int(16 * s)))
-            banner_surf.blit(sub, (banner_w // 2 - sub.get_width() // 2, int(58 * s)))
-            self.screen.blit(banner_surf, (self.width // 2 - banner_w // 2, self.height // 2 - banner_h // 2))
-
-        # 6. Prominent Centered Alerts
-        if self.kinematics.is_jackknifed(self.state):
-            jk_w, jk_h = int(490 * s), int(115 * s)
-            jk_surf = pygame.Surface((jk_w, jk_h), pygame.SRCALPHA)
-            pygame.draw.rect(jk_surf, (28, 10, 14, 245), (0, 0, jk_w, jk_h), border_radius=int(14 * s))
-            pygame.draw.rect(jk_surf, (255, 60, 65), (0, 0, jk_w, jk_h), 2, border_radius=int(14 * s))
-
-            title = self.font_big_alert.render("JACKKNIFED", True, (255, 65, 70))
-            sub = self.font_big_sub.render("HITCH LOCKED · PRESS [R] TO RESET", True, (235, 220, 225))
-            jk_surf.blit(title, (jk_w // 2 - title.get_width() // 2, int(20 * s)))
-            jk_surf.blit(sub, (jk_w // 2 - sub.get_width() // 2, int(68 * s)))
-            self.screen.blit(jk_surf, (self.width // 2 - jk_w // 2, self.height // 2 - jk_h // 2))
-        elif self.is_off_track:
-            ot_w, ot_h = int(510 * s), int(115 * s)
-            ot_surf = pygame.Surface((ot_w, ot_h), pygame.SRCALPHA)
-            pygame.draw.rect(ot_surf, (36, 20, 12, 245), (0, 0, ot_w, ot_h), border_radius=int(14 * s))
-            pygame.draw.rect(ot_surf, (255, 145, 45), (0, 0, ot_w, ot_h), 2, border_radius=int(14 * s))
-
-            title = self.font_big_alert.render("OFF COURSE", True, (255, 145, 45))
-            sub = self.font_big_sub.render(f"LATERAL DEVIATION > 6.0 m ({self.cross_track_err:.1f} m) · PRESS [R]", True, (255, 235, 220))
-            ot_surf.blit(title, (ot_w // 2 - title.get_width() // 2, int(20 * s)))
-            ot_surf.blit(sub, (ot_w // 2 - sub.get_width() // 2, int(68 * s)))
-            self.screen.blit(ot_surf, (self.width // 2 - ot_w // 2, self.height // 2 - ot_h // 2))
-        elif self.is_paused and not self.has_arrived:
-            pause_w, pause_h = int(450 * s), int(116 * s)
-            pause_surf = pygame.Surface((pause_w, pause_h), pygame.SRCALPHA)
-            pygame.draw.rect(pause_surf, (15, 22, 34, 245), (0, 0, pause_w, pause_h), border_radius=int(14 * s))
-            pygame.draw.rect(pause_surf, (70, 160, 245, 230), (0, 0, pause_w, pause_h), 2, border_radius=int(14 * s))
-            pygame.draw.rect(pause_surf, (120, 195, 255, 60), (2, 2, pause_w - 4, pause_h - 4), 1, border_radius=int(12 * s))
-
-            title = self.font_big_alert.render("PAUSED", True, (80, 185, 255))
-            sub1 = self.font_big_sub.render("PRESS [SPACE] TO RESUME", True, (220, 235, 252))
-            sub2 = self.font_mono.render("[R] Restart   [M] Mode   [P] Sample Path", True, (140, 165, 195))
-
-            pause_surf.blit(title, (pause_w // 2 - title.get_width() // 2, int(18 * s)))
-            pause_surf.blit(sub1, (pause_w // 2 - sub1.get_width() // 2, int(64 * s)))
-            pause_surf.blit(sub2, (pause_w // 2 - sub2.get_width() // 2, int(90 * s)))
-            self.screen.blit(pause_surf, (self.width // 2 - pause_w // 2, self.height // 2 - pause_h // 2))
+        self.hud.draw()
 
     def render(self):
+        self.screen.fill(COLOR_NIGHT_BG)
+        self.screen.set_clip(self.camera.viewport)
         # 1. Instant Blit of pre-baked static environment (clean yard boundary, road, F1 curbs, finish line, vignette)
         if self.background_surf is not None:
             self.screen.blit(self.background_surf, (0, 0))
@@ -1781,19 +1210,17 @@ class JackknifeGame25D:
             pygame.draw.lines(self.screen, COLOR_ACCENT_CYAN, False, pts, 2)
 
         # 2. Clear and populate single unified dynamic alpha layer (Zero 4K allocation)
-        self.dynamic_alpha_surf.fill((0, 0, 0, 0))
-        self.draw_dynamic_finish_line_glow()
-        self.draw_vehicle_shadows()
-        self.draw_lighting()
-        self.draw_predictive_trajectories()
-        self.draw_attention_rays()
-
-        # 3. Single instant alpha compositing pass
-        self.screen.blit(self.dynamic_alpha_surf, (0, 0))
-
-        # 4. Direct draw dynamic foreground elements onto screen
-        self.draw_dynamic_finish_line_core()
-        self.draw_truck_and_trailers()
+        if not self.drawing_mode:
+            self.dynamic_alpha_surf.fill((0, 0, 0, 0))
+            self.draw_dynamic_finish_line_glow()
+            self.draw_vehicle_shadows()
+            self.draw_lighting()
+            self.draw_predictive_trajectories()
+            self.draw_attention_rays()
+            self.screen.blit(self.dynamic_alpha_surf, (0, 0))
+            self.draw_dynamic_finish_line_core()
+            self.draw_truck_and_trailers()
+        self.screen.set_clip(None)
         self.draw_hud()
         pygame.display.flip()
 
@@ -1803,7 +1230,7 @@ class JackknifeGame25D:
         Ignore wall-time beyond 250 ms after a stall (e.g. dragging the window)
         so resuming cannot trigger an unbounded physics catch-up loop.
         """
-        if self.is_paused:
+        if self.is_paused or getattr(self, "drawing_mode", False):
             self.simulation_accumulator = 0.0
             return
         if keys is None:
