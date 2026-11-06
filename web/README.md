@@ -49,6 +49,13 @@ fonts, seeded snow, light sprites and desktop reference screenshots under
 from the repository root. Deploy the contents of `web/dist/` to a static host.
 The build uses relative URLs and supports hosting under a subdirectory.
 
+GitHub Actions builds the browser game on every push and pull request. After
+both platforms pass CI, pushes to the default branch publish `web/dist/` to
+GitHub Pages, including the exported model and shared game assets. To enable
+publishing once, select **Settings → Pages → Build and deployment → Source →
+GitHub Actions** in the repository. The workflow can also be run manually on the
+default branch. The expected project URL is <https://barhanc.github.io/jackknife/>.
+
 ## Controls
 
 W/S or arrows drive forward/reverse, A/D steer, Space pauses, M changes steering
