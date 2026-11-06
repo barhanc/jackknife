@@ -30,3 +30,5 @@ Train the model:
 ```bash
 uv run python main.py --train --epochs 4 --batch-size 64 --lr 3e-4 --stream --trajectories 60
 ```
+
+Browser version (experimental): see [web/README.md](web/README.md) for setup and WebGPU requirements.
