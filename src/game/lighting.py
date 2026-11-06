@@ -36,23 +36,24 @@ class TruckLighting:
         del opacity
         return image
 
-    def _beam(self, scale, length, strength):
+    def _beam(self, scale, length, strength, red_mix=0.0):
         margin = .8
         width = max(4,round((length+2*margin)*scale))
-        height = max(4,round((length*.5+2)*scale))
+        height = max(4,round((length*.8+2)*scale))
         yy,xx = np.mgrid[:height,:width]
         origin = (round(margin*scale),height//2)
         x,y = (xx-origin[0])/scale,(yy-origin[1])/scale
         distance = np.maximum(x,0)
-        spread = .2+.22*distance
+        spread = .28+.33*distance
         outer = np.exp(-1.8*(y/spread)**2)
-        core = np.exp(-1.8*(y/(.12+.09*distance))**2)
+        core = np.exp(-1.8*(y/(.16+.13*distance))**2)
         forward = 1/(1+np.exp(-np.clip(x*10,-40,40)))
         cutoff = np.clip((length-x)/2,0,1)**2
         intensity = (.7*outer+.3*core)*np.exp(-distance/6)*forward*cutoff
         alpha = np.clip(strength*intensity,0,255)
         warm = core*np.exp(-distance/7)
         rgb = np.stack((205+45*warm,222+20*warm,235-24*warm),axis=-1)
+        rgb = rgb*(1-red_mix)+np.array((255,65,65))*red_mix
         return self._image(rgb,alpha),origin
 
     def _halo(self, scale, color, radius, strength):
@@ -72,7 +73,7 @@ class TruckLighting:
         self._scale = key
         self._sprites = {
             'head': self._beam(scale,13.5,72),
-            'reverse': self._beam(scale,6.5,40),
+            'reverse': self._beam(scale,6.5,40,red_mix=.22),
             'white': self._halo(scale,(255,239,199),1.3,65),
             'red': self._halo(scale,(255,48,58),1.25,75),
         }
@@ -95,8 +96,6 @@ class TruckLighting:
             pixel = camera.project(*point)
             self._blit(surface,self._sprites['head'],pixel,state.theta0)
             self._blit(surface,self._sprites['white'],pixel)
-        for point in self.taillights(state,dims,rear_axle):
-            self._blit(surface,self._sprites['red'],camera.project(*point))
         if reversing:
             x,y,heading = rear_axle
             c,s = math.cos(heading),math.sin(heading)
@@ -104,6 +103,8 @@ class TruckLighting:
             for side in (-dims.trailer2_width*.27,dims.trailer2_width*.27):
                 pixel = camera.project(x+offset*c-side*s,y+offset*s+side*c)
                 self._blit(surface,self._sprites['reverse'],pixel,heading+math.pi)
+        for point in self.taillights(state,dims,rear_axle):
+            self._blit(surface,self._sprites['red'],camera.project(*point))
 
     @staticmethod
     def draw_lens(surface, camera, point, heading, color, height=0.0):
